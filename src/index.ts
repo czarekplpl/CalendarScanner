@@ -48,6 +48,10 @@ export default {
       if (path === '/api/universe' && request.method === 'GET') {
         return json({ count: UNIVERSE_SNAPSHOT.length, universe: UNIVERSE_SNAPSHOT });
       }
+      if (path.startsWith('/api/candidate/') && request.method === 'GET') {
+        if (!authorized(request, env)) return unauthorized();
+        return await handleCandidate(env, path.slice('/api/candidate/'.length));
+      }
       if (path === '/api/export' && request.method === 'GET') {
         if (!authorized(request, env)) return unauthorized();
         return await handleExport(env, url);
@@ -174,6 +178,71 @@ async function handleScan(
     },
     200,
   );
+}
+
+/**
+ * Pojedynczy kandydat w formie potrzebnej do weryfikacji u brokera.
+ *
+ *   GET /api/candidate/NFLX
+ *
+ * PO CO: skrypt weryfikacyjny (scripts/verify_ibkr.py) potrzebuje DOKŁADNYCH nóg
+ * — dat wygaśnięć i strike'u — żeby zapytać brokera o te same opcje, które
+ * ocenił skaner. Bez tego skrypt musiałby zgadywać, a wtedy porównanie
+ * „skaner vs broker" nie miałoby sensu.
+ *
+ * Zwracamy tylko to, co niezbędne do weryfikacji, plus kontekst z alertu.
+ */
+async function handleCandidate(env: Env, symbolRaw: string): Promise<Response> {
+  const symbol = decodeURIComponent(symbolRaw).toUpperCase().trim();
+  if (!symbol || symbol.length > 12) {
+    return json({ error: 'Nieprawidłowy symbol', symbol }, 400);
+  }
+
+  const scan = await loadScan(env);
+  if (!scan) {
+    return json(
+      { error: 'Brak wyniku skanu — uruchom najpierw /api/scan?refresh=1', symbol },
+      404,
+    );
+  }
+
+  const c = scan.candidates.find((x) => x.symbol.toUpperCase() === symbol);
+  if (!c) {
+    // Spółka może być na liście obserwacyjnej — wtedy podajemy powód, bo to
+    // istotna informacja: „nie ma jej, bo brak płynności" to nie to samo co
+    // „nie ma jej, bo nie raportuje w oknie".
+    const w = scan.watchlistOnly.find((x) => x.symbol.toUpperCase() === symbol);
+    return json(
+      {
+        error: w ? 'Spółka jest tylko na liście obserwacyjnej (brak danych do oceny)' : 'Spółki nie ma w bieżącym wyniku skanu',
+        symbol,
+        reason: w?.reason,
+        asOf: scan.asOf,
+        hint: 'Lista kandydatów: /api/scan',
+      },
+      404,
+    );
+  }
+
+  return json({
+    asOf: scan.asOf,
+    generatedAt: scan.generatedAt,
+    scannerVersion: scan.scannerVersion,
+    optionsProvider: scan.config.optionsProvider,
+    candidate: c,
+    // Podpowiedź dla skryptu weryfikacyjnego: co dokładnie zapytać u brokera.
+    legsToVerify: {
+      front: c.front
+        ? { expiration: c.front.expiration, strike: c.front.atmStrike ?? null, right: 'C' }
+        : null,
+      back: c.back
+        ? { expiration: c.back.expiration, strike: c.back.atmStrike ?? null, right: 'C' }
+        : null,
+      note:
+        'Strike jest wyliczony z kursu i interwału siatki. Jeśli w brokerze nie ma dokładnie ' +
+        'takiego strike, skrypt sprawdzi najbliższy dostępny.',
+    },
+  });
 }
 
 /**
