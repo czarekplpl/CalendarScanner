@@ -188,16 +188,20 @@ def polacz_z_ib(host: str, port: int, client_id: int):
         ) from None
 
     ib = IB()
-    print(f"   łączę z IB Gateway {host}:{port} (clientId={client_id})...")
+    print(f"   łączę z TWS/IB Gateway {host}:{port} (clientId={client_id})...")
     try:
         ib.connect(host, port, clientId=client_id, timeout=15, readonly=True)
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
-            f"BŁĘDNY: nie mogę połączyć się z IB Gateway ({exc.__class__.__name__}: {exc}).\n"
+            f"BŁĄD: nie mogę połączyć się z TWS/IB Gateway ({exc.__class__.__name__}: {exc}).\n"
             "       Sprawdź:\n"
-            "         1. czy IB Gateway (lub TWS) jest uruchomiony i zalogowany,\n"
-            "         2. Configuration -> API -> Settings -> 'Enable ActiveX and Socket Clients',\n"
-            "         3. właściwy port: 4001 = live, 4002 = paper (opcja --port)."
+            "         1. czy TWS (lub IB Gateway) jest uruchomiony i zalogowany,\n"
+            "         2. Configuration -> API -> Settings -> ZAZNACZONE 'Enable ActiveX and Socket Clients'\n"
+            "            (sam wpis portu nie wystarcza — bez tego checkboxa TWS nie otwiera gniazda),\n"
+            "         3. właściwy port (opcja --port):\n"
+            "              TWS:     7496 = live, 7497 = paper  (może być zmieniony w konfiguracji),\n"
+            "              Gateway: 4001 = live, 4002 = paper,\n"
+            "         4. czy port jest otwarty: nc -z -v 127.0.0.1 <port>"
         ) from None
     print(f"   połączono. Konto: {ib.managedAccounts()}")
     return ib
@@ -304,7 +308,8 @@ def main() -> int:
     )
     parser.add_argument("symbol", help="ticker spółki z alertu, np. NFLX")
     parser.add_argument("--host", default="127.0.0.1", help="host IB Gateway (domyślnie 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=4001, help="port: 4001 live, 4002 paper")
+    parser.add_argument("--port", type=int, default=4001,
+                        help="port API: TWS 7496/7497, IB Gateway 4001/4002 (domyślnie 4001)")
     parser.add_argument("--client-id", type=int, default=77, help="clientId (dowolny wolny)")
     parser.add_argument("--api-key", help="klucz API Workera (pole API_KEY w .dev.vars)")
     parser.add_argument("--worker", default=DEFAULT_WORKER, help="adres Workera")
