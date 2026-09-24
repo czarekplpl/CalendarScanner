@@ -73,8 +73,8 @@ EMAIL_PROVIDER = "brevo"
 
 # Odbiorca alertów; nadawca musi być zweryfikowany u dostawcy (Brevo: nadawcy z listy
 # "Senders", Resend: własna domena). Dozwolony format z nazwą: "Skaner <adres@domena>".
-ALERT_EMAIL_TO = ""
-ALERT_EMAIL_FROM = "scanner@twojadomena.pl"
+ALERT_EMAIL_TO = "unplcn@gmail.com"
+ALERT_EMAIL_FROM = "wesley@wesleyoptions.pl"
 
 # ── Bezpieczeństwo ───────────────────────────────────────────────────────────
 # Żądania do /api/* wymagają nagłówka x-api-key = API_KEY (ustaw jako sekret).

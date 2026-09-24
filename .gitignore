@@ -12,6 +12,7 @@ dist/
 .env.*
 .cloudflare.env
 .github-token
+.email-config
 !.env.example
 
 # Wyniki lokalnych skanów
