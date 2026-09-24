@@ -405,6 +405,131 @@ test('D1: liczba wartości zgadza się z liczbą kolumn (inaczej rozjedzie się 
   assert.deepEqual(kolumnyWSql, [...CANDIDATE_COLUMNS], 'SQL musi wymieniać wszystkie kolumny schematu');
 });
 
+test('kontrakt: każda wartość trafia do SWOJEJ kolumny (markery)', async () => {
+  // Ten test powstał po realnym błędzie: SCHEMA_VERSION był na czwartej pozycji
+  // listy wartości, a kolumna `schema_version` jest pierwsza. Wszystko przesunęło
+  // się o jeden i do bazy trafiły śmieci (symbol = data, as_of = sektor).
+  //
+  // Poprzedni test porównywał tylko NAZWY i LICZBĘ kolumn — więc takiego
+  // przesunięcia nie widział. Tu podstawiamy UNIKALNY marker pod każde pole
+  // i sprawdzamy, czy wylądował przy właściwej kolumnie. Dzięki temu każdy
+  // przyszły rozjazd kolejności zostanie wykryty natychmiast.
+  const fake = makeD1();
+  const env = { DB: fake.db } as unknown as Env;
+
+  const marker = (n: string) => `MARKER_${n}`;
+  const oznaczony = candidate({
+    symbol: marker('SYMBOL'),
+    name: marker('NAME'),
+    sector: marker('SECTOR'),
+    spot: 123.45,
+    earnings: { symbol: marker('SYMBOL'), date: marker('EARNINGS_DATE'), timing: 'amc', confirmed: true },
+    daysToEarnings: 26,
+    tradingDaysToEarnings: 18,
+    score: 77,
+    grade: 'B',
+    flags: [marker('FLAGS')],
+    suggestedEntryDate: marker('ENTRY'),
+    ivRank: 0.33,
+    components: [
+      { key: 'timing', label: 'x', points: 11, maxPoints: 34, note: '' },
+      { key: 'termStructure', label: 'x', points: 22, maxPoints: 22, note: '' },
+      { key: 'cheapness', label: 'x', points: 33, maxPoints: 16, note: '' },
+      { key: 'liquidity', label: 'x', points: 44, maxPoints: 18, note: '' },
+      { key: 'ivRank', label: 'x', points: 55, maxPoints: 10, note: '' },
+    ],
+    front: {
+      expiration: marker('FRONT_EXP'),
+      dte: 22,
+      daysToEarnings: 4,
+      atmIv: 0.35,
+      ivSource: 'provider',
+      straddleMid: 1,
+      impliedMovePct: 0.05,
+      atmOpenInterest: 150,
+      atmSpreadPct: 0.02,
+      strikeCount: 40,
+      pricingSource: marker('FRONT_PRICING'),
+    },
+    back: {
+      expiration: marker('BACK_EXP'),
+      dte: 57,
+      daysToEarnings: -31,
+      atmIv: 0.42,
+      ivSource: 'provider',
+      straddleMid: 1,
+      impliedMovePct: 0.07,
+      atmOpenInterest: 150,
+      atmSpreadPct: 0.02,
+      strikeCount: 40,
+      pricingSource: marker('BACK_PRICING'),
+    },
+    termStructureSlope: 0.07,
+    warnings: [],
+  });
+
+  const scan = scanWith([oznaczony], {
+    asOf: marker('AS_OF'),
+    scannerVersion: marker('SCANNER_VERSION'),
+    config: {
+      alertMinDays: 25,
+      alertMaxDays: 45,
+      optionsProvider: marker('PROVIDER'),
+      earningsProvider: 'finnhub',
+      tradierEnv: marker('ENV'),
+    },
+  });
+
+  await writeScanToD1(env, scan);
+  const ins = fake.captured.find((c) => c.sql.includes('INSERT OR REPLACE INTO scan_candidates'))!;
+  const kolumny = ins.sql
+    .slice(ins.sql.indexOf('(') + 1, ins.sql.indexOf(')'))
+    .split(',')
+    .map((c) => c.trim());
+
+  const wartosc = (kolumna: string): unknown => ins.params[kolumny.indexOf(kolumna)];
+
+  // Pola tekstowe z markerami — najłatwiej wykryć przesunięcie.
+  const oczekiwane: Record<string, unknown> = {
+    schema_version: SCHEMA_VERSION,
+    as_of: marker('AS_OF'),
+    symbol: marker('SYMBOL'),
+    name: marker('NAME'),
+    sector: marker('SECTOR'),
+    earnings_date: marker('EARNINGS_DATE'),
+    flags: marker('FLAGS'),
+    suggested_entry_date: marker('ENTRY'),
+    front_expiration: marker('FRONT_EXP'),
+    front_pricing_source: marker('FRONT_PRICING'),
+    back_expiration: marker('BACK_EXP'),
+    back_pricing_source: marker('BACK_PRICING'),
+    options_provider: marker('PROVIDER'),
+    options_env: marker('ENV'),
+    scanner_version: marker('SCANNER_VERSION'),
+  };
+
+  for (const [kolumna, expected] of Object.entries(oczekiwane)) {
+    assert.equal(
+      wartosc(kolumna),
+      expected,
+      `kolumna "${kolumna}" zawiera ${JSON.stringify(wartosc(kolumna))}, a powinna ${JSON.stringify(expected)}. ` +
+        'To oznacza rozjazd kolejności między CANDIDATE_COLUMNS a candidateValues() w d1.ts.',
+    );
+  }
+
+  // Pola numeryczne — sprawdzamy, że liczby nie powędrowały do kolumn tekstowych.
+  assert.equal(wartosc('score'), 77);
+  assert.equal(wartosc('days_to_earnings'), 26);
+  assert.equal(wartosc('spot'), 123.45);
+  assert.equal(wartosc('front_iv'), 0.35);
+  assert.equal(wartosc('iv_rank'), 0.33);
+  assert.equal(wartosc('points_timing'), 11);
+  assert.equal(wartosc('points_term_structure'), 22);
+  assert.equal(wartosc('points_cheapness'), 33);
+  assert.equal(wartosc('points_liquidity'), 44);
+  assert.equal(wartosc('points_iv_rank'), 55);
+});
+
 test('kontrakt: schema.sql zawiera WSZYSTKIE kolumny z kodu', async () => {
   // Ten test istnieje, bo dokładnie ten błąd wystąpił na produkcji: dodając kolumny
   // `*_pricing_source` zaktualizowałem kod i CSV, ale zapomniałem o schema.sql.

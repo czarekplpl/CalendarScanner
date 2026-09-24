@@ -86,13 +86,18 @@ function candidateValues(scan: ScanResult, c: ScanResult['candidates'][number]):
   // IV rank: u dostawcy tastytrade pochodzi z API, u tradiera z naszej historii.
   const ivRankSource = c.ivRank === undefined ? undefined : scan.config.optionsProvider === 'tastytrade' ? 'provider' : 'history';
 
+  // KOLEJNOŚĆ MUSI odpowiadać 1:1 kolejności CANDIDATE_INSERT_COLUMNS.
+  // Ten blok był już raz źródłem poważnego błędu: SCHEMA_VERSION trafił na
+  // czwartą pozycję zamiast pierwszej, przez co WSZYSTKIE wartości przesunęły
+  // się o jeden, a do bazy trafiły śmieci (symbol = data, as_of = nazwa sektora).
+  // Test `kolejność wartości odpowiada kolumnom` sprawdza to markerami.
   return [
+    SCHEMA_VERSION,
     scan.asOf,
     c.symbol,
-    c.earnings.date,
-    SCHEMA_VERSION,
     s(c.name),
     s(c.sector),
+    c.earnings.date,
     n(c.daysToEarnings),
     n(c.tradingDaysToEarnings),
     boolToInt(c.earnings.confirmed),
