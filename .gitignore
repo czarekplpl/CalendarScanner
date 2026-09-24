@@ -1,0 +1,19 @@
+# Zależności i build
+node_modules/
+dist/
+.wrangler/
+
+# SEKRETY — nigdy nie commituj
+# .dev.vars* łapie też warianty środowiskowe (.dev.vars.production itd.)
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+
+# Wyniki lokalnych skanów
+test-output/
+
+# Systemowe
+.DS_Store
+*.log

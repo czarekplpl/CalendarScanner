@@ -1,0 +1,75 @@
+# Cloudflare Worker — skaner wyników + kalendarzy na ekspansję IV
+#
+# Deploy:  npx wrangler deploy
+# Sekrety: npx wrangler secret put FINNHUB_API_KEY   (itd. — patrz README)
+
+name = "earnings-iv-scanner"
+main = "src/index.ts"
+compatibility_date = "2025-09-23"
+# Zgodność Node: daje crypto.subtle, Intl i pełny standardowy runtime
+compatibility_flags = ["nodejs_compat"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRON — dwa przebiegi dziennie (UTC)
+# 21:10 UTC = po zamknięciu sesji US (17:10 ET latem, 16:10 ET zimą)
+# 11:10 UTC = przed otwarciem (7:10 ET) — wyłapuje zmiany daty wyników
+# ─────────────────────────────────────────────────────────────────────────────
+[triggers]
+crons = ["10 11 * * 1-5", "10 21 * * 1-5"]
+
+[vars]
+# ── Dostawcy danych ──────────────────────────────────────────────────────────
+# finnhub = kalendarz wyników (darmowy klucz)
+# tradier  = łańcuchy opcji (darmowy sandbox; dane 15 min opóźnione)
+EARNINGS_PROVIDER = "finnhub"
+OPTIONS_PROVIDER = "tradier"
+
+# "sandbox" (darmowy, opóźniony) albo "production" (konto w Tradier, real-time + greki)
+TRADIER_ENV = "sandbox"
+
+# ── Progi skanowania ─────────────────────────────────────────────────────────
+# Okno alertu: skanuj wyników, które wypadają między MIN a MAX dni od dziś.
+# 25–45 dni => alert wpada ~30 dni przed wynikami (z zapasem na korekty daty).
+ALERT_MIN_DAYS = "25"
+ALERT_MAX_DAYS = "45"
+
+# Ile spółek z top 200 może być analizowanych głęboko (łańcuchy opcji) w jednym przebiegu.
+# Chroni limity API. Reszta trafia na listę "obserwuj" bez wyceny opcji.
+MAX_DEEP_ANALYSIS = "40"
+
+# Minimalny obrót opcjami ATM (kontrakty), żeby kalendarz był wykonalny.
+MIN_OPEN_INTEREST = "100"
+
+# Czy doliczyć do skanu ~38 najbardziej płynnych ETF-ów (poza top 200 spółek)?
+# Domyślnie false, bo ETF NIE MA wyników spółki — kalendarz zwraca dla nich daty
+# dystrybucji, a nie publikacji raportu. Włącz świadomie, jeśli chcesz patrzeć na
+# term structure ETF-ów wokół wyników ich największych składników.
+INCLUDE_ETFS = "false"
+
+# ── Alerty ───────────────────────────────────────────────────────────────────
+# Włącz kanały po ustawieniu sekretów. "dashboard" zawsze działa.
+ALERT_CHANNELS = "dashboard,telegram,email"
+
+# ── E-mail (Resend) ──────────────────────────────────────────────────────────
+ALERT_EMAIL_TO = ""
+ALERT_EMAIL_FROM = "scanner@twojadomena.pl"
+
+# ── Bezpieczeństwo ───────────────────────────────────────────────────────────
+# Żądania do /api/* wymagają nagłówka x-api-key = API_KEY (ustaw jako sekret).
+# Dashboard (/) jest publiczny; /scan i /api/* tylko z kluczem.
+REQUIRE_API_KEY = "true"
+
+# ── Koszty / higiena ─────────────────────────────────────────────────────────
+# TTL cache w sekundach (KV). 3600 = 1 h.
+CACHE_TTL_SECONDS = "3600"
+# Maksymalna liczba alertów na jeden przebieg (żeby nie zasypać kanału).
+MAX_ALERTS_PER_RUN = "25"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KV — trwały stan: historia IV (do IV rank), wysłane alerty, uniwersum
+# Utwórz namespace i wklej id poniżej (patrz README, krok 3):
+#   npx wrangler kv namespace create STATE
+# ─────────────────────────────────────────────────────────────────────────────
+# [[kv_namespaces]]
+# binding = "STATE"
+# id = "WKLEJ_TUTAJ_ID"

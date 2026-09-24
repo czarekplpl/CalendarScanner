@@ -1,0 +1,296 @@
+{
+  "generatedAt": "2026-09-24T21:10:04.512Z",
+  "asOf": "2026-09-24",
+  "config": {
+    "alertMinDays": 25,
+    "alertMaxDays": 45,
+    "optionsProvider": "tradier",
+    "earningsProvider": "finnhub",
+    "tradierEnv": "sandbox"
+  },
+  "counts": {
+    "universe": 200,
+    "withUpcomingEarnings": 37,
+    "inAlertWindow": 11,
+    "analyzed": 11,
+    "candidates": 3,
+    "alertsSent": 2
+  },
+  "candidates": [
+    {
+      "symbol": "NKE",
+      "name": "NIKE, Inc.",
+      "sector": "Consumer Discretionary",
+      "spot": 74.31,
+      "earnings": {
+        "symbol": "NKE",
+        "date": "2026-10-20",
+        "timing": "amc",
+        "confirmed": true,
+        "epsEstimate": 0.52
+      },
+      "daysToEarnings": 26,
+      "tradingDaysToEarnings": 18,
+      "earningsInsideBackOnly": true,
+      "front": {
+        "expiration": "2026-10-16",
+        "dte": 22,
+        "daysToEarnings": 4,
+        "atmIv": 0.382,
+        "ivSource": "computed",
+        "straddleMid": 3.42,
+        "impliedMovePct": 0.046,
+        "atmOpenInterest": 2840,
+        "atmSpreadPct": 0.024,
+        "strikeCount": 61
+      },
+      "back": {
+        "expiration": "2026-11-20",
+        "dte": 57,
+        "daysToEarnings": 31,
+        "atmIv": 0.331,
+        "ivSource": "computed",
+        "straddleMid": 4.95,
+        "impliedMovePct": 0.0666,
+        "atmOpenInterest": 1180,
+        "atmSpreadPct": 0.031,
+        "strikeCount": 58
+      },
+      "termStructureSlope": -0.051,
+      "termStructureRatio": 1.154,
+      "ivRank": 22,
+      "avgHistoricalMovePct": 0.071,
+      "score": 71,
+      "grade": "B",
+      "components": [
+        {
+          "key": "timing",
+          "label": "Umiejscowienie wyników",
+          "points": 34,
+          "maxPoints": 34,
+          "note": "Wyniki 4 dni po wygaśnięciu frontu — strefa optymalna (theta + ramp-up IV bez gapu)."
+        },
+        {
+          "key": "termStructure",
+          "label": "Nachylenie term structure",
+          "points": 5.5,
+          "maxPoints": 22,
+          "note": "Silnie odwrócona krzywa (-5.1 pp) — rynek agresywnie wycenia zdarzenie w froncie; kalendarz na ekspansję tu nie działa."
+        },
+        {
+          "key": "cheapness",
+          "label": "Taniość opcjonalności",
+          "points": 16,
+          "maxPoints": 16,
+          "note": "Rynek wycenia ruch 4.6% vs. historyczne 7.1% — opcjonalność tania. IV frontu 38% — w komfortowym zakresie do handlu kalendarzem."
+        },
+        {
+          "key": "liquidity",
+          "label": "Płynność kalendarza",
+          "points": 18,
+          "maxPoints": 18,
+          "note": "OI ATM min(front, back) = 1180 kontraktów. Najgorszy spread ATM 3.1% mid."
+        },
+        {
+          "key": "ivRank",
+          "label": "IV rank (historia skanera)",
+          "points": 7.1,
+          "maxPoints": 10,
+          "note": "IV rank 22% — zmienność niska względem własnej historii, dobre miejsce na long vega."
+        }
+      ],
+      "flags": ["STREFA-OPTYMALNA", "TANIA-OPCJONALNOSC", "IV-NISKO", "PLYNNY"],
+      "suggestedEntryDate": "2026-10-01",
+      "warnings": []
+    },
+    {
+      "symbol": "MU",
+      "name": "Micron Technology, Inc.",
+      "sector": "Information Technology",
+      "spot": 168.4,
+      "earnings": {
+        "symbol": "MU",
+        "date": "2026-10-08",
+        "timing": "amc",
+        "confirmed": true
+      },
+      "daysToEarnings": 14,
+      "tradingDaysToEarnings": 10,
+      "earningsInsideBackOnly": false,
+      "front": {
+        "expiration": "2026-10-16",
+        "dte": 22,
+        "daysToEarnings": -8,
+        "atmIv": 0.582,
+        "ivSource": "computed",
+        "straddleMid": 11.2,
+        "impliedMovePct": 0.0665,
+        "atmOpenInterest": 4120,
+        "atmSpreadPct": 0.019,
+        "strikeCount": 88
+      },
+      "back": {
+        "expiration": "2026-11-20",
+        "dte": 57,
+        "daysToEarnings": 43,
+        "atmIv": 0.548,
+        "ivSource": "computed",
+        "straddleMid": 16.4,
+        "impliedMovePct": 0.0974,
+        "atmOpenInterest": 2210,
+        "atmSpreadPct": 0.028,
+        "strikeCount": 84
+      },
+      "termStructureSlope": -0.034,
+      "termStructureRatio": 1.062,
+      "ivRank": 64,
+      "avgHistoricalMovePct": 0.058,
+      "score": 63,
+      "grade": "B",
+      "components": [
+        {
+          "key": "timing",
+          "label": "Umiejscowienie wyników",
+          "points": 24.5,
+          "maxPoints": 34,
+          "note": "Wyniki 8 dni PRZED wygaśnięciem frontu — klasyczny pre-earnings calendar: łapiesz ramp-up IV, ale masz krótką ekspozycję na gap."
+        },
+        {
+          "key": "termStructure",
+          "label": "Nachylenie term structure",
+          "points": 5.5,
+          "maxPoints": 22,
+          "note": "Front IV wyższa o 3.4 pp — zdarzenie już w cenach frontu; sprzedajesz droższą nogę."
+        },
+        {
+          "key": "cheapness",
+          "label": "Taniość opcjonalności",
+          "points": 6.7,
+          "maxPoints": 16,
+          "note": "Implied 6.7% vs. historyczne 5.8% — rynek wycenia więcej niż typowo."
+        },
+        {
+          "key": "liquidity",
+          "label": "Płynność kalendarza",
+          "points": 18,
+          "maxPoints": 18,
+          "note": "OI ATM min(front, back) = 2210 kontraktów. Najgorszy spread ATM 2.8% mid."
+        },
+        {
+          "key": "ivRank",
+          "label": "IV rank (historia skanera)",
+          "points": 1.5,
+          "maxPoints": 10,
+          "note": "IV rank 64% — powyżej środka; uważaj na wejście po szczycie."
+        }
+      ],
+      "flags": ["WYNIKI-W-FRONCIE", "PLYNNY"],
+      "suggestedEntryDate": "2026-09-24",
+      "warnings": ["Szeroki spread bid-ask na strike ATM — wejście/wyjście zjedzą część zysku."]
+    },
+    {
+      "symbol": "PEP",
+      "name": "PepsiCo, Inc.",
+      "sector": "Consumer Staples",
+      "spot": 142.05,
+      "earnings": {
+        "symbol": "PEP",
+        "date": "2026-10-30",
+        "timing": "unknown",
+        "confirmed": false
+      },
+      "daysToEarnings": 36,
+      "tradingDaysToEarnings": 25,
+      "earningsInsideBackOnly": true,
+      "front": {
+        "expiration": "2026-10-16",
+        "dte": 22,
+        "daysToEarnings": 14,
+        "atmIv": 0.221,
+        "ivSource": "computed",
+        "straddleMid": 3.1,
+        "impliedMovePct": 0.0218,
+        "atmOpenInterest": 940,
+        "atmSpreadPct": 0.041,
+        "strikeCount": 44
+      },
+      "back": {
+        "expiration": "2026-12-18",
+        "dte": 85,
+        "daysToEarnings": 49,
+        "atmIv": 0.248,
+        "ivSource": "computed",
+        "straddleMid": 5.6,
+        "impliedMovePct": 0.0394,
+        "atmOpenInterest": 320,
+        "atmSpreadPct": 0.062,
+        "strikeCount": 40
+      },
+      "termStructureSlope": 0.027,
+      "termStructureRatio": 0.891,
+      "ivRank": 41,
+      "avgHistoricalMovePct": 0.024,
+      "score": 66,
+      "grade": "B",
+      "components": [
+        {
+          "key": "timing",
+          "label": "Umiejscowienie wyników",
+          "points": 34,
+          "maxPoints": 34,
+          "note": "Wyniki 14 dni po wygaśnięciu frontu — strefa optymalna (theta + ramp-up IV bez gapu)."
+        },
+        {
+          "key": "termStructure",
+          "label": "Nachylenie term structure",
+          "points": 17.2,
+          "maxPoints": 22,
+          "note": "Back IV wyższa o 2.7 pp — zdrowe, dodatnie nachylenie."
+        },
+        {
+          "key": "cheapness",
+          "label": "Taniość opcjonalności",
+          "points": 2.4,
+          "maxPoints": 16,
+          "note": "Implied 2.2% vs. historyczne 2.4% — wycena rozsądna. IV frontu tylko 22% — mały absolutny ruch, słaba konweksja."
+        },
+        {
+          "key": "liquidity",
+          "label": "Płynność kalendarza",
+          "points": 5.4,
+          "maxPoints": 18,
+          "note": "OI ATM min(front, back) = 320 kontraktów. Najgorszy spread ATM 6.2% mid."
+        },
+        {
+          "key": "ivRank",
+          "label": "IV rank (historia skanera)",
+          "points": 4.5,
+          "maxPoints": 10,
+          "note": "IV rank 41% — neutralnie."
+        }
+      ],
+      "flags": ["STREFA-OPTYMALNA"],
+      "suggestedEntryDate": "2026-10-01",
+      "warnings": [
+        "Data wyników niepotwierdzona — spółka może ją przesunąć, a to zmienia cały układ nóg.",
+        "Niski open interest ATM — ryzyko, że nie zbudujesz i nie zamkniesz struktury po godziwej cenie."
+      ]
+    }
+  ],
+  "watchlistOnly": [
+    {
+      "symbol": "ORCL",
+      "earningsDate": "2026-10-22",
+      "daysToEarnings": 28,
+      "reason": "brak łańcucha opcji dla wybranych terminów (możliwe: brak notowania w sandboxie albo brak wygaśnięć w oknie wyników)"
+    },
+    {
+      "symbol": "COST",
+      "earningsDate": "2026-09-30",
+      "daysToEarnings": 6,
+      "reason": "poza oknem głębokiej analizy (limit MAX_DEEP_ANALYSIS=40)"
+    }
+  ],
+  "errors": [],
+  "durationMs": 41820
+}

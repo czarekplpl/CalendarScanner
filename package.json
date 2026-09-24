@@ -1,0 +1,24 @@
+{
+  "name": "earnings-iv-scanner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Skaner top 200 spółek US: wyniki ~30 dni wcześniej + ocena kalendarzy pod ekspansję IV",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail --format pretty",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "scan:local": "node --experimental-strip-types scripts/scan-local.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.99.0",
+    "@types/node": "^22.10.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,51 @@
+name: CI
+
+# Ten workflow NIE wdraża aplikacji — tylko sprawdza, czy kod jest zdrowy.
+# Wdrożenie robi Cloudflare (przez ./setup-cloudflare.sh lokalnie albo przez
+# integrację Git w panelu Cloudflare). Rozdział jest celowy: sekrety produkcyjne
+# trzymamy w jednym miejscu (Cloudflare), a nie w dwóch systemach.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  weryfikacja:
+    name: Testy, typy, build
+    runs-on: ubuntu-latest
+    # Wrangler domyślnie pisze logi do katalogu w $HOME. W środowiskach, gdzie ten
+    # katalog jest niedostępny (sandbox, część runnerów), kończy się to błędem EPERM
+    # i niezerowym exit code. Jawne wskazanie /tmp czyni build niezawodnym.
+    env:
+      WRANGLER_LOG_PATH: /tmp/wrangler-logs
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Instalacja zależności
+        run: npm ci
+
+      - name: Testy (72 przypadki)
+        run: npm test
+
+      - name: Kontrola typów (TypeScript strict)
+        run: npm run typecheck
+
+      - name: Kontrola formatu konfiguracji sekretów
+        run: npx wrangler deploy --dry-run --outdir /tmp/dry-run
+
+      - name: Sprawdź, czy nie zacommitowano sekretów
+        run: |
+          echo "Sprawdzam, czy w repo nie ma plików z kluczami..."
+          if git ls-files | grep -qE '(^|/)\.dev\.vars$|(^|/)\.env$|(^|/)\.env\.'; then
+            echo "::error::W repozytorium jest plik z sekretami (.dev.vars / .env). Usuń go z historii gita!"
+            exit 1
+          fi
+          echo "OK — brak plików z sekretami w repozytorium."
