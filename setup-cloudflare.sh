@@ -40,10 +40,17 @@ cd "$(dirname "$0")"
 #
 # Robimy to TYLKO wtedy, gdy domyślny katalog jest niedostępny — użytkownik
 # w normalnym terminalu ma do niego prawo i nie chcemy mu rozrzucać configu.
-if ! mkdir -p "${HOME}/Library/Preferences/.wrangler" 2>/dev/null; then
+# Test musi sprawdzać ZAPIS PLIKU, nie samo mkdir: w środowiskach sandbox
+# `mkdir` potrafi się udać, a zapis już nie, przez co wrangler przewraca się
+# dopiero przy deployu z mylącym błędem EPERM.
+WRANGLER_CFG_DIR="${HOME}/Library/Preferences/.wrangler"
+mkdir -p "$WRANGLER_CFG_DIR" 2>/dev/null || true
+if ! touch "${WRANGLER_CFG_DIR}/.write-test" 2>/dev/null; then
   export HOME="${TMPDIR:-/tmp}/wrangler-home"
   mkdir -p "$HOME"
-  warn "Katalog konfiguracji w Twoim HOME jest niedostępny — przekierowuję HOME na $HOME"
+  warn "Katalog konfiguracji w Twoim HOME nie pozwala zapisywać — przekierowuję HOME na $HOME"
+else
+  rm -f "${WRANGLER_CFG_DIR}/.write-test"
 fi
 export WRANGLER_LOG_PATH="${WRANGLER_LOG_PATH:-${HOME}/.wrangler-logs}"
 mkdir -p "$WRANGLER_LOG_PATH" 2>/dev/null || true

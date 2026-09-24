@@ -14,7 +14,9 @@
 #
 # Wcześniej:
 #   - napisz COKOLWIEK do swojego bota na Telegramie (samo "start" wystarczy),
-#   - jeśli chcesz e-mail, wklej klucz API v3 Brevo do .dev.vars (BREVO_API_KEY).
+#   - jeśli chcesz e-mail, wklej klucz API v3 Brevo do .dev.vars (BREVO_API_KEY)
+#     oraz ustaw ALERT_EMAIL_TO / ALERT_EMAIL_FROM w wrangler.toml (to konfiguracja,
+#     nie sekret — trzymanie ich w obu plikach powoduje odrzucenie przez Cloudflare).
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -28,9 +30,16 @@ fail() { echo "${RED}BŁĄD${RESET} $*" >&2; exit 1; }
 [[ -f .cloudflare.env ]] || fail "Brak pliku .cloudflare.env — potrzebny token Cloudflare do wdrożenia."
 
 # Wrangler potrzebuje zapisywalnego HOME — patrz komentarz w setup-cloudflare.sh
-if ! mkdir -p "${HOME}/Library/Preferences/.wrangler" 2>/dev/null; then
+# Test musi sprawdzać ZAPIS PLIKU, nie samo mkdir: w środowiskach sandbox
+# `mkdir` potrafi się udać, a zapis już nie, przez co wrangler przewraca się
+# dopiero przy deployu z mylącym błędem EPERM.
+WRANGLER_CFG_DIR="${HOME}/Library/Preferences/.wrangler"
+mkdir -p "$WRANGLER_CFG_DIR" 2>/dev/null || true
+if ! touch "${WRANGLER_CFG_DIR}/.write-test" 2>/dev/null; then
   export HOME="${TMPDIR:-/tmp}/wrangler-home"
   mkdir -p "$HOME"
+else
+  rm -f "${WRANGLER_CFG_DIR}/.write-test"
 fi
 export WRANGLER_LOG_PATH="${HOME}/.wrangler-logs"
 mkdir -p "$WRANGLER_LOG_PATH" 2>/dev/null || true
@@ -117,14 +126,52 @@ else
     xsmtpsib-*) fail "BREVO_API_KEY to klucz SMTP (xsmtpsib-...), a API v3 wymaga klucza 'xkeysib-...'.
 Wejdź na https://app.brevo.com/settings/keys/api -> zakładka API Keys." ;;
   esac
-  to="$(get_var ALERT_EMAIL_TO)"; from="$(get_var ALERT_EMAIL_FROM)"
-  [[ -n "$to" ]] && [[ -n "$from" ]] || warn "Uzupełnij ALERT_EMAIL_TO i ALERT_EMAIL_FROM w .dev.vars, inaczej e-mail nie wyjdzie."
+  # Te dwie wartości są KONFIGURACJĄ ([vars] w wrangler.toml), nie sekretem —
+  # trzymanie ich w .dev.vars powoduje kolizję nazw i odrzucenie przez Cloudflare.
+  to="$(grep -E '^ALERT_EMAIL_TO' wrangler.toml | head -1 | cut -d'"' -f2)"
+  from="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
+  if [[ -z "$to" || -z "$from" ]]; then
+    warn "Ustaw ALERT_EMAIL_TO i ALERT_EMAIL_FROM w wrangler.toml (sekcja [vars]), inaczej e-mail nie wyjdzie."
+  else
+    ok "E-mail: z ${from} na ${to}"
+  fi
   ok "Klucz Brevo wygląda poprawnie"
 fi
 
 echo
 echo "${BOLD}=== 3. WDRAŻAM SEKRETY ===${RESET}"
-npx wrangler secret bulk .dev.vars >/dev/null 2>&1 && ok "Sekrety wgrane do Cloudflare"
+
+# KOLIZJA NAZW: Cloudflare odrzuca sekret, którego nazwa jest już zajęta przez
+# zmienną z wrangler.toml, i przerywa CAŁY secret bulk — czyli żaden sekret nie
+# dojdzie. Sprawdzamy to PRZED wysyłką, bo komunikat z API jest mylący
+# ("Binding name already in use"), a skutek wygląda jak cicha awaria.
+collisions=$(comm -12 \
+  <(grep -oE '^[A-Z_]+ =' wrangler.toml | tr -d ' =' | sort -u) \
+  <(grep -oE '^[A-Z_]+=' .dev.vars | tr -d '=' | sort -u) || true)
+if [[ -n "$collisions" ]]; then
+  warn "Te nazwy są w OBU plikach i Cloudflare je odrzuci:"
+  echo "$collisions" | sed 's/^/       /'
+  echo "     Usuwam je z .dev.vars — konfiguracja należy do wrangler.toml."
+  while read -r key; do
+    [[ -n "$key" ]] || continue
+    python3 - "$key" <<'PYCOLL'
+import pathlib, re, sys
+key = sys.argv[1]
+p = pathlib.Path('.dev.vars'); s = p.read_text()
+p.write_text(re.sub(rf'^{re.escape(key)}=.*\n?', '', s, flags=re.M))
+PYCOLL
+  done <<< "$collisions"
+fi
+
+sec_out=$(npx wrangler secret bulk .dev.vars 2>&1)
+if echo "$sec_out" | grep -q "Successfully created"; then
+  ok "Sekrety wgrane: $(echo "$sec_out" | grep -c 'Successfully created')"
+elif echo "$sec_out" | grep -qE "failed|ERROR"; then
+  echo "$sec_out" | grep -E "ERROR|already in use|failed" | head -5
+  fail "Nie udało się wgrać sekretów (szczegóły powyżej)"
+else
+  ok "Sekrety zaktualizowane"
+fi
 npx wrangler deploy 2>&1 | grep -E "Uploaded|Deployed" || fail "Deploy nie powiódł się — sprawdź output powyżej."
 
 echo
