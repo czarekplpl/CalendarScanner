@@ -97,7 +97,8 @@ export default {
 
       console.log(
         `[scanner] cron koniec: kandydaci=${scan.counts.candidates} alerty=${dispatch.sent} ` +
-          `pominięte=${dispatch.skipped} błędy=${scan.errors.length + dispatch.errors.length} ` +
+          `pominięte=${dispatch.skipped} poniżejProgu=${dispatch.belowThreshold} ` +
+          `błędy=${scan.errors.length + dispatch.errors.length} ` +
           `czas=${Date.now() - started}ms`,
       );
       for (const e of [...scan.errors, ...dispatch.errors].slice(0, 10)) {

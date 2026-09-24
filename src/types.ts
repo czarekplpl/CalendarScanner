@@ -187,6 +187,8 @@ export interface Env {
   MIN_OPEN_INTEREST?: string;
   ALERT_CHANNELS?: string;
   INCLUDE_ETFS?: string;
+  /** Minimalna ocena, od której wysyłamy alert. Poniżej — tylko dashboard i baza. */
+  MIN_ALERT_SCORE?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
   REQUIRE_API_KEY?: string;

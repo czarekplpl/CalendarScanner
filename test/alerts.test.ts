@@ -328,6 +328,84 @@ test('dispatchAlerts: respektuje MAX_ALERTS_PER_RUN', async () => {
   assert.equal(calls.length, 2);
 });
 
+test('dispatchAlerts: MIN_ALERT_SCORE pomija kandydatów o niskiej ocenie', async () => {
+  // Bez tego progu alert leciał dla KAŻDEGO kandydata — także dla oceny 40, którą
+  // scoring ścina za problem krytyczny. W praktyce 21 wiadomości dziennie,
+  // w większości bezużytecznych.
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram', MIN_ALERT_SCORE: '60' });
+
+  const kandydujacy = [
+    candidate({ symbol: 'AAA', score: 85, grade: 'A' }),
+    candidate({ symbol: 'BBB', score: 70, grade: 'B' }),
+    candidate({ symbol: 'CCC', score: 60, grade: 'C' }), // dokładnie na progu => przechodzi
+    candidate({ symbol: 'DDD', score: 59, grade: 'C' }),
+    candidate({ symbol: 'EEE', score: 40, grade: 'D' }),
+  ];
+
+  const { result, calls } = await withFetch(() => dispatchAlerts(env, scanWith(kandydujacy)));
+
+  assert.equal(result.sent, 3, 'wysłane: AAA (85), BBB (70), CCC (60)');
+  assert.equal(result.belowThreshold, 2, 'pominięte: DDD (59), EEE (40)');
+  assert.equal(calls.length, 3, 'trzy wiadomości, nie pięć');
+
+  const wyslane = calls.map((c) => (c.body as { text: string }).text);
+  for (const sym of ['AAA', 'BBB', 'CCC']) {
+    assert.ok(wyslane.some((t) => t.includes(sym)), `${sym} powinien być w alertach`);
+  }
+  for (const sym of ['DDD', 'EEE']) {
+    assert.ok(!wyslane.some((t) => t.includes(sym)), `${sym} NIE powinien być w alertach`);
+  }
+});
+
+test('dispatchAlerts: pominięci przez próg NIE są oznaczani jako wysłani', async () => {
+  // Kluczowe: gdybyśmy oznaczali ich jako wysłanych, to po wzroście oceny
+  // (np. gdy zbliżą się wyniki i nachylenie się poprawi) alert by NIE poleciał.
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram', MIN_ALERT_SCORE: '60' });
+
+  const niska = candidate({ symbol: 'ZZZ', score: 45, grade: 'C' });
+  const pierwszy = await withFetch(() => dispatchAlerts(env, scanWith([niska])));
+  assert.equal(pierwszy.result.sent, 0);
+  assert.equal(pierwszy.result.belowThreshold, 1);
+  assert.equal(kv.puts, 0, 'nic nie zapisano do rejestru');
+
+  // Ten sam cykl wyników, ale ocena wzrosła powyżej progu
+  const wyzsza = candidate({ symbol: 'ZZZ', score: 68, grade: 'B' });
+  const drugi = await withFetch(() => dispatchAlerts(env, scanWith([wyzsza])));
+  assert.equal(drugi.result.sent, 1, 'po wzroście oceny alert MUSI polecieć');
+});
+
+test('dispatchAlerts: MIN_ALERT_SCORE=0 wyłącza próg (wysyła wszystko)', async () => {
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram', MIN_ALERT_SCORE: '0' });
+  const wszystkie = [
+    candidate({ symbol: 'A1', score: 85, grade: 'A' }),
+    candidate({ symbol: 'D1', score: 40, grade: 'D' }),
+  ];
+  const { result } = await withFetch(() => dispatchAlerts(env, scanWith(wszystkie)));
+  assert.equal(result.sent, 2);
+  assert.equal(result.belowThreshold, 0);
+});
+
+test('dispatchAlerts: domyślny próg to 60, gdy zmienna nieustawiona', async () => {
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram' });
+  delete env.MIN_ALERT_SCORE;
+
+  const { result } = await withFetch(() =>
+    dispatchAlerts(
+      env,
+      scanWith([
+        candidate({ symbol: 'WYS', score: 61, grade: 'B' }),
+        candidate({ symbol: 'NIS', score: 59, grade: 'C' }),
+      ]),
+    ),
+  );
+  assert.equal(result.sent, 1, 'tylko kandydat z oceną 61 przechodzi');
+  assert.equal(result.belowThreshold, 1);
+});
+
 test('dispatchAlerts: brak skonfigurowanych kanałów nic nie robi', async () => {
   const kv = makeKv();
   const env = envWith({ STATE: kv, ALERT_CHANNELS: 'dashboard' });

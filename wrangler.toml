@@ -79,6 +79,21 @@ INCLUDE_ETFS = "false"
 # Włącz kanały po ustawieniu sekretów. "dashboard" zawsze działa.
 ALERT_CHANNELS = "dashboard,telegram,email"
 
+# Minimalna ocena, od której WYSYŁAMY alert.
+#
+# Bez tego progu alert leciał dla KAŻDEGO kandydata — czyli też dla tych z oceną 40,
+# które zostały ścięte za problem krytyczny (brak płynności, odwrócona krzywa,
+# niepotwierdzona data). W praktyce dawało to ~21 wiadomości dziennie, z czego
+# 17 bezużytecznych, i Telegram stawał się szumem.
+#
+# Skąd 60: w rozkładzie ocen jest wyraźna pustka między 40 a 70 — spółki albo mają
+# problem krytyczny (40), albo są sensowne (70+). Próg 60 nie tnie więc żadnej grupy
+# na granicy. Daje ~4 alerty dziennie zamiast 21.
+#
+# UWAGA: niższe oceny NIE znikają — są w dashboardzie, w /api/scan i w bazie D1,
+# więc backtest zbiera pełne dane niezależnie od tego progu.
+MIN_ALERT_SCORE = "60"
+
 # ── E-mail ───────────────────────────────────────────────────────────────────
 # Dostawca wysyłki: "brevo" (domyślnie) albo "resend".
 # Brevo wymaga sekretu BREVO_API_KEY = klucz API v3 (zakładka "API Keys", prefiks xkeysib-).

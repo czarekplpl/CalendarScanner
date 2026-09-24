@@ -29,6 +29,8 @@ const DEFAULT_EMAIL_PROVIDER: EmailProvider = 'brevo';
 export interface AlertDispatchResult {
   sent: number;
   skipped: number;
+  /** Pominięte z powodu oceny poniżej MIN_ALERT_SCORE (są w dashboardzie i bazie) */
+  belowThreshold: number;
   channels: string[];
   errors: string[];
 }
@@ -280,7 +282,7 @@ async function sendEmail(env: Env, subject: string, html: string): Promise<void>
  * Wywoływane tylko z crona (i z /scan, gdy body zawiera ?alerts=1).
  */
 export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertDispatchResult> {
-  const out: AlertDispatchResult = { sent: 0, skipped: 0, channels: [], errors: [] };
+  const out: AlertDispatchResult = { sent: 0, skipped: 0, belowThreshold: 0, channels: [], errors: [] };
 
   const channels = (env.ALERT_CHANNELS ?? 'dashboard')
     .split(',')
@@ -293,6 +295,9 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
   if (!wantsTelegram && !wantsEmail) return out;
 
   const maxAlerts = num(env, 'MAX_ALERTS_PER_RUN', 25);
+  // Próg oceny: poniżej niego NIE wysyłamy alertu, ale kandydat zostaje w danych.
+  // Domyślnie 60 — patrz uzasadnienie w wrangler.toml. Wartość 0 wyłącza próg.
+  const minScore = num(env, 'MIN_ALERT_SCORE', 60);
   const registry = await loadAlertRegistry(env);
   const sentAt = new Date().toISOString();
   // Rekordy zbieramy w pamięci i zapisujemy do KV JEDEN raz na końcu.
@@ -303,6 +308,15 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
 
   for (const candidate of scan.candidates) {
     if (count >= maxAlerts) break;
+
+    // Filtr oceny. Kandydaci poniżej progu są świadomie pomijani — inaczej Telegram
+    // dostawał ~21 wiadomości dziennie, w większości o ocenie 40 (ściętej za problem
+    // krytyczny). Nie oznaczamy ich jako wysłanych, więc jeśli ocena wzrośnie przy
+    // kolejnym skanie, alert poleci wtedy.
+    if (candidate.score < minScore) {
+      out.belowThreshold++;
+      continue;
+    }
 
     const tier = alertTier(candidate.daysToEarnings, candidate.score);
     const key = alertKey(candidate.symbol, candidate.earnings.date, tier);
