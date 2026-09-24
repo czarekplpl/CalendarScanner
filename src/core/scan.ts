@@ -16,7 +16,7 @@
  * i treści alertów.
  */
 
-import { FinnhubAdapter, approxMoveFromSurprises } from '../adapters/finnhub.ts';
+import { FinnhubAdapter } from '../adapters/finnhub.ts';
 import { TradierAdapter, selectCalendarLegs } from '../adapters/tradier.ts';
 import { TastytradeAdapter, type SymbolMetrics } from '../adapters/tastytrade.ts';
 import { KvCache, mapLimit } from './http.ts';
@@ -328,7 +328,11 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
   // Potrzebne do wyboru strike ATM. Dostawca opcji podaje kurs, gdy potrafi
   // (tradier); gdy nie (tastytrade nie ma notowań na naszym poziomie uprawnień),
   // bierzemy go z Finnhuba. Pytamy TYLKO o finalistów, więc to kilkanaście żądań.
-  const historyAdapter = env.FINNHUB_API_KEY ? new FinnhubAdapter(env.FINNHUB_API_KEY) : undefined;
+  // Finnhub pełni tu DWIE role: kurs akcji dla finalistów oraz (w innym miejscu)
+  // kalendarz wyników. Nazwa zmiennej mówi teraz wprost, do czego służy w tym
+  // miejscu — wcześniej „historyAdapter" sugerował historię wyników, której już
+  // nie używamy do oceny.
+  const spotAndCalendarAdapter = env.FINNHUB_API_KEY ? new FinnhubAdapter(env.FINNHUB_API_KEY) : undefined;
 
   // ── 5b. Budżet żądań ───────────────────────────────────────────────────────
   // Cloudflare ogranicza liczbę subrequestów na JEDNO wywołanie Workera (osobny,
@@ -381,8 +385,7 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
       universeEntry: universeBySymbol.get(item.symbol),
       optionsAdapter,
       metrics: metricsBySymbol.get(item.symbol),
-      spotProvider: historyAdapter,
-      historyAdapter,
+      spotProvider: spotAndCalendarAdapter,
       minOpenInterest: cfg.minOpenInterest,
       asOf,
       env,
@@ -425,7 +428,6 @@ interface AnalyzeArgs {
    * notowań na naszym poziomie uprawnień — kurs bierzemy z Finnhuba.
    */
   spotProvider?: { quote(symbol: string): Promise<number | undefined> };
-  historyAdapter?: FinnhubAdapter;
   minOpenInterest: number;
   asOf: string;
   env: Env;
@@ -433,7 +435,7 @@ interface AnalyzeArgs {
 
 /** Analiza jednej spółki: spot -> wygaśnięcia -> nogi -> punkty IV -> ocena. */
 async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | undefined> {
-  const { item, universeEntry, optionsAdapter, historyAdapter, minOpenInterest, asOf, env } = args;
+  const { item, universeEntry, optionsAdapter, minOpenInterest, asOf, env } = args;
   const symbol = item.symbol;
 
   // Kurs akcji: najpierw dostawca opcji (tradier go ma), potem Finnhub
@@ -500,16 +502,16 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
       if (ivRank === undefined) ivRank = recorded.ivRank;
     }
 
-    // Typowy ruch historyczny — best-effort, nie blokuje analizy.
-    let avgHistoricalMovePct: number | undefined;
-    if (historyAdapter) {
-      try {
-        const history = await historyAdapter.earningsHistory(symbol, 8);
-        avgHistoricalMovePct = approxMoveFromSurprises(history).avgAbsMovePct;
-      } catch {
-        /* opcjonalne */
-      }
-    }
+    // HISTORYCZNY RUCH KURSU — świadomie NIE używamy tu danych z Finnhuba.
+    //
+    // Finnhub /stock/earnings zwraca `surprisePercent`, czyli niespodziankę na EPS,
+    // a NIE reakcję kursu po wynikach. Podstawianie jednego za drugie dawało
+    // pozornie precyzyjną ocenę taniości opcjonalności opartą na nieprawdziwych
+    // liczbach. Do tego darmowy plan zwraca tylko 4 kwartały — za mało na statystykę.
+    //
+    // Dopóki nie mamy źródła z historycznymi KURSAMI (IBKR je ma), przekazujemy
+    // undefined. Scoring użyje wtedy oceny neutralnej i powie o tym wprost.
+    const avgHistoricalMovePct: number | undefined = undefined;
 
     return scoreCandidate({
       symbol,

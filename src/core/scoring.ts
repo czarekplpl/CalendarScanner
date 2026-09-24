@@ -197,6 +197,24 @@ export function scoreCheapness(
   const parts: string[] = [];
   let points = max * 0.5; // punkt startowy, gdy brak historii do porównania
 
+  // UWAGA — SKĄD BIERZE SIĘ `avgHistoricalMovePct` I CZYM NIE JEST:
+  //
+  // Jedynym darmowym źródłem, jakie mieliśmy, był endpoint Finnhuba
+  // /stock/earnings, który zwraca `surprisePercent` — czyli NIESPODZIANKĘ NA EPS
+  // (o ile faktyczny zysk na akcję pobił prognozę analityków). To NIE jest ruch
+  // kursu akcji po wynikach. Spółka może pobić prognozę o 2% i spaść o 5%, bo
+  // rynek oczekiwał więcej — i odwrotnie.
+  //
+  // Dodatkowo darmowy plan Finnhuba zwraca TYLKO 4 kwartały, co jest zbyt małą
+  // próbą na jakąkolwiek statystykę.
+  //
+  // Dlatego ten parametr jest teraz ŚWIADOMIE przekazywany jako undefined
+  // (patrz core/scan.ts): ocena opiera się wyłącznie na poziomie IV i jawnie
+  // mówi, że brakuje historii ruchów. Wcześniej podstawialiśmy EPS jako ruch
+  // kursu, co dawało pozornie precyzyjną, ale nieprawdziwą ocenę.
+  //
+  // Aby to naprawić, trzeba źródła z HISTORYCZNYMI KURSAMI (np. IBKR, które ma
+  // dane historyczne) i policzyć realne reakcje kursu w dniu wyników.
   if (avgHistoricalMovePct && avgHistoricalMovePct > 0.005) {
     const ratio = impliedMovePct / avgHistoricalMovePct;
     if (ratio <= 0.75) {
@@ -213,7 +231,10 @@ export function scoreCheapness(
       parts.push(`Implied ${(impliedMovePct * 100).toFixed(1)}% vs. historyczne ${(avgHistoricalMovePct * 100).toFixed(1)}% — spora premia za zdarzenie; wchodzisz na drogo.`);
     }
   } else {
-    parts.push(`Brak historii ruchów po wynikach — ocena po samej cenie (implied move ${(impliedMovePct * 100).toFixed(1)}%).`);
+    parts.push(
+      `Brak danych o historycznych ruchach kursu po wynikach — ocena wyłącznie po poziomie zmienności ` +
+        `(implied move ${(impliedMovePct * 100).toFixed(1)}%). Ocena neutralna, nie „tania opcjonalność".`,
+    );
   }
 
   const ivPct = frontIv * 100;

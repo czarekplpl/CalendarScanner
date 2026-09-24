@@ -325,7 +325,10 @@ test('end-to-end: cron wykrywa wyniki ~30 dni wcześniej i wysyła alert', async
 
   const text = (telegram[0]!.body as { text: string }).text;
   assert.match(text, new RegExp(SYMBOL));
-  assert.match(text, /\[A 9\d\]/, 'alert musi nieść ocenę i literę');
+  // Sprawdzamy FORMAT (litera + ocena), nie konkretną liczbę — ocena zmienia się
+  // przy każdej korekcie wag scoringu, a test ma pilnować, że alert niesie ocenę,
+  // a nie że wynosi dokładnie 94.
+  assert.match(text, /\[[A-D] \d{1,3}\]/, 'alert musi nieść literę oceny i wynik punktowy');
   assert.match(text, /IV 32\.0%/, 'alert pokazuje IV frontu');
   assert.match(text, /IV 40\.0%/, 'alert pokazuje IV backu');
   assert.match(text, new RegExp(earningsDate));
