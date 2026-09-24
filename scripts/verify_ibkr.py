@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 from datetime import date, datetime
@@ -139,31 +138,10 @@ def wybierz_strike(spot: float, podany: float | None) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def cena_call(S: float, K: float, T: float, sigma: float, r: float) -> float:
-    if T <= 0 or sigma <= 0:
-        return max(S - K, 0.0)
-    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    return S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
 
 
-def iv_z_ceny(cena: float, S: float, K: float, dni: int, r: float = 0.04) -> float | None:
-    """Szuka IV bisekcją. Zwraca None, gdy cena poza zakresem sensownych wartości."""
-    T = max(dni, 1) / 365.0
-    lo, hi = 0.001, 5.0
-    if cena <= cena_call(S, K, T, lo, r) or cena >= cena_call(S, K, T, hi, r):
-        return None
-    for _ in range(80):
-        mid = (lo + hi) / 2
-        if cena_call(S, K, T, mid, r) > cena:
-            hi = mid
-        else:
-            lo = mid
-    return (lo + hi) / 2
 
 
 def dni_do(dzien: str) -> int:
@@ -273,6 +251,17 @@ def pobierz_notowanie(ib, kontrakt) -> dict[str, Any]:
     last = liczba("last", "close")
     mid = (bid + ask) / 2 if bid and ask else None
 
+    # `last` bywa POZA widełkami bid/ask — to normalne (transakcja po agresywnej
+    # cenie, a rynek zdążył się przesunąć). Dla opcji to często WIARYGODNIEJSZA
+    # cena niż środek szerokiego spreadu, bo jest faktem, a nie ofertą.
+    # Dlatego podajemy obie i oznaczamy, gdzie leży last.
+    if last and bid and ask:
+        pozycja_last = "w widełkach" if bid <= last <= ask else ("powyżej ask" if last > ask else "poniżej bid")
+    elif last:
+        pozycja_last = "brak jednej strony rynku"
+    else:
+        pozycja_last = "brak transakcji"
+
     return {
         "bid": bid,
         "ask": ask,
@@ -282,6 +271,7 @@ def pobierz_notowanie(ib, kontrakt) -> dict[str, Any]:
         "open_interest": liczba("callOpenInterest", "putOpenInterest"),
         "volume": liczba("volume"),
         "iv_ib": getattr(getattr(ticker, "modelGreeks", None), "impliedVol", None),
+        "last_position": pozycja_last,
     }
 
 
@@ -355,53 +345,58 @@ def main() -> int:
                 print(f"   kurs od IB: {spot_ib:.2f}  (skaner miał {fmt(spot_scan)})")
             q = pobierz_notowanie(ib, kontrakt)
             wyniki[nazwa] = q
-            print(f"      bid {fmt(q['bid'])} / ask {fmt(q['ask'])}  →  mid {fmt(q['mid'])}")
+            print(f"      bid {fmt(q['bid'])} / ask {fmt(q['ask'])}  →  mid {fmt(q['mid'])}   last {fmt(q['last'])}  ({q['last_position']})")
             print(f"      spread: {fmt(q['spread_pct'], '%', 1)}   OI: {q['open_interest'] or 'n/d'}   wolumen: {q['volume'] or 'n/d'}")
             if q["iv_ib"]:
                 print(f"      IV od IB: {q['iv_ib'] * 100:.1f}%")
 
         print(f"\n{'─' * 78}")
-        print("4. PORÓWNANIE: skaner vs broker")
+        print("4. CZY STRUKTURA JEST WYKONALNA")
         print(f"{'─' * 78}\n")
+
+        # UWAGA: NIE liczymy tu IV sami i nie porównujemy jej z tastytrade.
+        # Powód: tastytrade podaje IV policzoną swoją metodyką (z dywidendą i ceną
+        # forward), a skaner bierze ją WPROST — nie liczy niczego sam. Liczenie IV
+        # z cen brokera wprowadzało sztuczną różnicę 2-3pp, która brała się
+        # z odmiennej metodyki, a nie z błędów danych. Wnioski z takiego
+        # porównania były mylące, więc zostało usunięte.
+        #
+        # Weryfikujemy to, czego tastytrade NIE DAJE: realny spread bid-ask,
+        # głębokość rynku i faktyczny koszt zbudowania struktury.
 
         for nazwa, leg in (("front", front_scan), ("back", back_scan)):
             q = wyniki[nazwa]
-            dni = dni_do(leg.get("expiration", ""))
-            iv_scan = leg.get("atmIv")
-            iv_rynek = q["iv_ib"]
-            if not iv_rynek and q["mid"] and spot_scan:
-                iv_rynek = iv_z_ceny(q["mid"], spot_scan, leg.get("atmStrike") or spot_scan, dni)
-            roznica = (iv_rynek - iv_scan) if (iv_rynek and iv_scan) else None
-            print(f"   {nazwa.upper():6s} ({dni:3d} dni)")
-            print(f"      IV skaner: {fmt(iv_scan, '%')}   IV broker: {fmt(iv_rynek, '%')}   różnica: {fmt(roznica, 'pp')}")
-            print(f"      spread bid-ask: {fmt(q['spread_pct'], '%', 1)}")
+            print(f"   {nazwa.upper():6s} {leg.get('expiration')}  strike {leg.get('atmStrike')}")
+            print(f"      bid {fmt(q['bid'])} / ask {fmt(q['ask'])}   (mid {fmt(q['mid'])}, last {fmt(q['last'])} — {q['last_position']})")
+            spread = q["spread_pct"]
+            if spread is not None:
+                ocena = "dobry" if spread < 0.03 else ("akceptowalny" if spread < 0.08 else "SZEROKI — uwaga")
+                print(f"      spread bid-ask: {fmt(spread, '%', 1)}  →  {ocena}")
+            print(f"      OI: {q['open_interest'] or 'n/d'}   wolumen dziś: {q['volume'] or 'n/d'}")
 
-        # Nachylenie: kluczowa teza strategii
-        iv_f = wyniki["front"]["iv_ib"]
-        iv_b = wyniki["back"]["iv_ib"]
-        if not iv_f and wyniki["front"]["mid"] and spot_scan:
-            iv_f = iv_z_ceny(wyniki["front"]["mid"], spot_scan, front_scan.get("atmStrike") or spot_scan, dni_do(front_scan.get("expiration", "")))
-        if not iv_b and wyniki["back"]["mid"] and spot_scan:
-            iv_b = iv_z_ceny(wyniki["back"]["mid"], spot_scan, back_scan.get("atmStrike") or spot_scan, dni_do(back_scan.get("expiration", "")))
-        if iv_f and iv_b:
-            nachylenie = iv_b - iv_f
-            print(f"\n   NACHYLENIE u brokera: {fmt(nachylenie, 'pp')}  (skaner: {fmt(c.get('termStructureSlope'), 'pp')})")
-            if nachylenie > 0.02:
-                print("      → TEZA POTWIERDZONA: back IV wyraźnie wyższa, jest miejsce na ekspansję.")
-            elif nachylenie > 0:
-                print("      → Teza słaba: nachylenie dodatnie, ale płaskie.")
-            else:
-                print("      → UWAGA: krzywa odwrócona — premia eventowa już w krótszej nodze.")
-
-        # Koszt struktury (debit) — do porównania z modelem skanera
+        # Koszt zbudowania kalendarza: kupujesz back, sprzedajesz front.
         if wyniki["front"]["mid"] and wyniki["back"]["mid"]:
-            debit = wyniki["back"]["mid"] - wyniki["front"]["mid"]
-            print(f"\n   KOSZT STRUKTURY (mid): {debit:+.2f} za kontrakt")
+            print(f"\n   KOSZT STRUKTURY (wycena po mid):        {wyniki['back']['mid'] - wyniki['front']['mid']:+.2f}")
             if wyniki["front"]["ask"] and wyniki["back"]["bid"]:
-                najgorszy = wyniki["back"]["bid"] - wyniki["front"]["ask"]
-                print(f"   W WARIANCIE PESYMISTYCZNYM: {najgorszy:+.2f} (kupno back po bid, sprzedaż front po ask)")
-            straddle_scan = front_scan.get("straddleMid")
-            print(f"   Skaner szacował straddle frontu modelem: {fmt(straddle_scan)}")
+                zle = wyniki["back"]["bid"] - wyniki["front"]["ask"]
+                print(f"   W NAJGORSZYM WARIANCIE (back po bid,")
+                print(f"   front po ask):                          {zle:+.2f}")
+                roznica = (wyniki["back"]["mid"] - wyniki["front"]["mid"]) - zle
+                print(f"   Koszt spreadów:                         {roznica:.2f}  ({roznica / max(abs(zle), 0.01) * 100:.0f}% ceny struktury)")
+
+        # Kontekst: co mówi tastytrade (dla przypomnienia, bez przeliczania)
+        print(f"\n   KONTEKST Z TASTYTRADE (to są dane skanera, nie moje obliczenia):")
+        print(f"      IV front {fmt(front_scan.get('atmIv'), '%')} / back {fmt(back_scan.get('atmIv'), '%')}")
+        print(f"      nachylenie term structure: {fmt(c.get('termStructureSlope'), 'pp')}")
+        nach = c.get("termStructureSlope")
+        if nach is not None:
+            if nach > 0.04:
+                print("      → Silne kontango: back wyraźnie droższy, jest miejsce na ekspansję.")
+            elif nach > 0.015:
+                print("      → Umiarkowane kontango: teza słabsza, ale kierunek właściwy.")
+            else:
+                print("      → Nachylenie płaskie lub odwrócone: premia eventowa już w krótszej nodze.")
+        print(f"      implied move (model tastytrade/BS): {fmt(front_scan.get('impliedMovePct'), '%')}")
 
         print(f"\n{'═' * 78}")
         print("  Weryfikacja zakończona. Skrypt nie składał żadnych zleceń.")
