@@ -18,7 +18,7 @@
 
 import { FinnhubAdapter, approxMoveFromSurprises } from '../adapters/finnhub.ts';
 import { TradierAdapter, selectCalendarLegs } from '../adapters/tradier.ts';
-import { TastytradeAdapter, type TastytradeMetrics } from '../adapters/tastytrade.ts';
+import { TastytradeAdapter, type SymbolMetrics } from '../adapters/tastytrade.ts';
 import { KvCache, mapLimit } from './http.ts';
 import { addDays, daysBetween, todayInNewYork, tradingDaysBetween } from './market.ts';
 import { scoreCandidate } from './scoring.ts';
@@ -69,10 +69,16 @@ export interface OptionsProvider {
     expiration: string;
     today: string;
     earningsDate: string;
-    metrics?: TastytradeMetrics;
+    metrics?: SymbolMetrics;
   }): Promise<IvPoint | undefined>;
   /** Metryki zmienności — dostępne tylko u części dostawców (tastytrade). */
-  marketMetrics?(symbol: string): Promise<TastytradeMetrics>;
+  marketMetrics?(symbol: string): Promise<SymbolMetrics>;
+  /**
+   * Metryki dla WIELU spółek jednym zapytaniem (do 200 u tastytrade).
+   * Gdy dostawca to obsługuje, skaner używa tej metody zamiast N osobnych
+   * zapytań — to różnica między kilkoma sekundami a kilkunastoma minutami.
+   */
+  marketMetricsBatch?(symbols: string[]): Promise<Map<string, SymbolMetrics>>;
 }
 
 /**
@@ -155,7 +161,6 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
   const asOf = deps.asOf ?? todayInNewYork();
   const universe = deps.universe ?? buildUniverse(cfg.includeEtfs);
   const errors: string[] = [];
-
   const cache = new KvCache(env.STATE, cfg.cacheTtlSeconds);
 
   const result: ScanResult = {
@@ -185,77 +190,133 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
     durationMs: 0,
   };
 
-  // ── 1. Kalendarz wyników ───────────────────────────────────────────────────
-  if (!deps.earningsAdapter && !env.FINNHUB_API_KEY) {
-    errors.push('Brak FINNHUB_API_KEY — nie mogę pobrać kalendarza wyników. Ustaw sekret: npx wrangler secret put FINNHUB_API_KEY');
-    result.durationMs = Date.now() - started;
-    return result;
+  // ── 1. Dostawca danych opcyjnych ───────────────────────────────────────────
+  // Tworzymy go PIERWSZEGO, bo w konfiguracji z tastytrade to on jest głównym
+  // źródłem dat wyników (patrz krok 2), a nie tylko dostawcą wycen opcji.
+  let optionsAdapter: OptionsProvider | undefined = deps.optionsAdapter;
+  if (!optionsAdapter) {
+    const created = createOptionsProvider(env, cfg);
+    if (!created.provider) {
+      errors.push(created.error ?? 'Nie udało się utworzyć dostawcy danych opcyjnych');
+      result.durationMs = Date.now() - started;
+      return result;
+    }
+    optionsAdapter = created.provider;
   }
 
-  const calendarFrom = asOf;
-  const calendarTo = addDays(asOf, cfg.alertMaxDays + 30);
-
-  let calendar: EarningsEvent[] = [];
-  try {
-    const adapter =
-      deps.earningsAdapter ?? new FinnhubAdapter(env.FINNHUB_API_KEY as string);
-    // Cache kalendarza na 6 h — cron chodzi 2x dziennie, a kalendarz zmienia się rzadko.
-    calendar = await cache.wrap(
-      `calendar:${cfg.earningsProvider}:${calendarFrom}:${calendarTo}`,
-      () => adapter.listEarnings(calendarFrom, calendarTo),
-      6 * 3600,
-    );
-  } catch (err) {
-    errors.push(`Kalendarz wyników: ${err instanceof Error ? err.message : String(err)}`);
-    result.durationMs = Date.now() - started;
-    return result;
-  }
-
-  // ── 2. Przecięcie z uniwersum ──────────────────────────────────────────────
   const universeBySymbol = new Map(universe.map((u) => [u.symbol.toUpperCase(), u]));
-
-  // Jedna spółka może mieć kilka wpisów (np. korekta daty) — bierzemy najbliższy przyszły.
   const upcoming = new Map<string, EarningsEvent>();
-  for (const ev of calendar) {
-    const symbol = ev.symbol.toUpperCase();
-    if (!universeBySymbol.has(symbol)) continue;
-    if (ev.date < asOf) continue;
-    const existing = upcoming.get(symbol);
-    if (!existing || ev.date < existing.date) upcoming.set(symbol, ev);
-  }
-  result.counts.withUpcomingEarnings = upcoming.size;
+  const dateSource = new Map<string, 'provider' | 'finnhub'>();
 
-  // ── 3. Okno alertu ─────────────────────────────────────────────────────────
+  // ── 2. Metryki zmienności + daty wyników od dostawcy opcji ─────────────────
+  // JEDNO zapytanie na całe uniwersum (tastytrade obsługuje do 200 symboli).
+  // Metryki niosą datę wyników POTWIERDZONĄ przez spółkę (`estimated: false`),
+  // więc są lepszym źródłem niż szacunki — i nie mają limitu liczby wpisów.
+  const metricsBySymbol = new Map<string, SymbolMetrics>();
+  if (optionsAdapter.marketMetricsBatch) {
+    try {
+      const batch = await optionsAdapter.marketMetricsBatch(universe.map((u) => u.symbol.toUpperCase()));
+      for (const [sym, m] of batch) metricsBySymbol.set(sym, m);
+    } catch (err) {
+      errors.push(`Metryki zmienności (batch): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  for (const [sym, m] of metricsBySymbol) {
+    const e = m.earnings;
+    if (!e?.date || !universeBySymbol.has(sym) || e.date < asOf) continue;
+    const days = daysBetween(asOf, e.date);
+    if (days < cfg.alertMinDays || days > cfg.alertMaxDays) continue;
+    upcoming.set(sym, { symbol: sym, date: e.date, timing: e.timing, confirmed: !e.estimated });
+    dateSource.set(sym, 'provider');
+  }
+
+  // ── 3. Finnhub jako UZUPEŁNIENIE ───────────────────────────────────────────
+  // WAŻNE OGRANICZENIE DARMOWEGO PLANU: jedno zapytanie zwraca MAKSYMALNIE 1500
+  // wpisów, posortowanych rosnąco po dacie. W szczycie sezonu jeden dzień ma ich
+  // kilkaset, więc szerokie okno kończy się CICHYM UCIĘCIEM odpowiedzi — i to
+  // wypadają z niej wpisy NAJBLIŻSZE, czyli dokładnie te, których szukamy.
+  //
+  // Dlatego pytamy DZIEŃ PO DNIU w oknie alertu. Koszt to ~20 zapytań na przebieg
+  // (a nie 200 — tyle byłoby przy pytaniu per spółka), a zysk to pewność, że nic
+  // nie wypadło. Zapytania idą do cache na 12 h, więc cron 2x dziennie płaci raz.
+  const finnhubAvailable = Boolean(deps.earningsAdapter || env.FINNHUB_API_KEY);
+  if (!finnhubAvailable) {
+    if (upcoming.size === 0) {
+      errors.push(
+        'Brak FINNHUB_API_KEY i brak dat wyników od dostawcy opcji — nie mam skąd wziąć kalendarza. ' +
+          'Ustaw sekret: npx wrangler secret bulk .dev.vars',
+      );
+    }
+  } else {
+    const adapter = deps.earningsAdapter ?? new FinnhubAdapter(env.FINNHUB_API_KEY as string);
+    const missing = new Set([...universeBySymbol.keys()].filter((sym) => !upcoming.has(sym)));
+
+    for (let offset = cfg.alertMinDays; offset <= cfg.alertMaxDays && missing.size > 0; offset++) {
+      const day = addDays(asOf, offset);
+      let events: EarningsEvent[] = [];
+      try {
+        events = await cache.wrap(
+          `calendar:day:${day}`,
+          () => adapter.listEarnings(day, day),
+          12 * 3600,
+        );
+      } catch (err) {
+        errors.push(`Kalendarz ${day}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      // Wykrywanie ucięcia: jeśli dostaliśmy dokładnie 1500 wpisów, odpowiedź
+      // mogła zostać obcięta. Zgłaszamy to jawnie, żeby nie zgadywać, czy dane
+      // są pełne — cicha niekompletność jest gorsza niż widoczny błąd.
+      if (events.length >= 1500) {
+        errors.push(
+          `Kalendarz ${day}: odpowiedź osiągnęła limit 1500 wpisów — dane mogą być niekompletne dla tego dnia.`,
+        );
+      }
+      for (const ev of events) {
+        const sym = ev.symbol.toUpperCase();
+        if (!missing.has(sym)) continue;
+        missing.delete(sym);
+        upcoming.set(sym, ev);
+        dateSource.set(sym, 'finnhub');
+      }
+    }
+  }
+
+  // ── 4. Okno alertu: filtr i priorytetyzacja ────────────────────────────────
   const inWindow: { symbol: string; event: EarningsEvent; daysToEarnings: number; marketCapB: number }[] = [];
   for (const [symbol, event] of upcoming) {
     const daysToEarnings = daysBetween(asOf, event.date);
-    if (daysToEarnings >= cfg.alertMinDays && daysToEarnings <= cfg.alertMaxDays) {
-      inWindow.push({
-        symbol,
-        event,
-        daysToEarnings,
-        marketCapB: universeBySymbol.get(symbol)?.marketCapB ?? 0,
-      });
-    }
+    if (daysToEarnings < cfg.alertMinDays || daysToEarnings > cfg.alertMaxDays) continue;
+    const metrics = metricsBySymbol.get(symbol);
+    inWindow.push({
+      symbol,
+      event,
+      daysToEarnings,
+      // Kapitalizacja z metryk dostawcy jest dokładniejsza niż ze snapshotu
+      // uniwersum, więc używamy jej do sortowania, gdy jest dostępna.
+      marketCapB: metrics?.marketCap
+        ? metrics.marketCap / 1e9
+        : (universeBySymbol.get(symbol)?.marketCapB ?? 0),
+    });
   }
+  result.counts.withUpcomingEarnings = upcoming.size;
   result.counts.inAlertWindow = inWindow.length;
 
-  // ── 4. Priorytetyzacja i limit głębokiej analizy ───────────────────────────
   inWindow.sort((a, b) => {
     // Najpierw te, którym najbardziej się spieszy (mniej dni do wyników),
-    // przy remisie — większa kapitalizacja (lepsza płynność opcji).
+    // przy remisie — większa kapitalizacja (zwykle lepsza płynność opcji).
     if (a.daysToEarnings !== b.daysToEarnings) return a.daysToEarnings - b.daysToEarnings;
     return b.marketCapB - a.marketCapB;
   });
 
   const toAnalyze = inWindow.slice(0, cfg.maxDeepAnalysis);
-  const skipped = inWindow.slice(cfg.maxDeepAnalysis);
-  for (const s of skipped) {
+  for (const s of inWindow.slice(cfg.maxDeepAnalysis)) {
     result.watchlistOnly.push({
       symbol: s.symbol,
       earningsDate: s.event.date,
       daysToEarnings: s.daysToEarnings,
-      reason: `poza oknem głębokiej analizy (limit MAX_DEEP_ANALYSIS=${cfg.maxDeepAnalysis}) — zwiększ limit albo zawęź ALERT_MIN_DAYS/MAX_DAYS`,
+      reason: `poza limitem głębokiej analizy (MAX_DEEP_ANALYSIS=${cfg.maxDeepAnalysis}) — zwiększ limit albo zawęź okno alertu`,
     });
   }
 
@@ -264,36 +325,20 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
     return result;
   }
 
-  // ── 5. Adapter opcji ───────────────────────────────────────────────────────
-  let optionsAdapter: OptionsProvider | undefined = deps.optionsAdapter;
-  if (!optionsAdapter) {
-    const created = createOptionsProvider(env, cfg);
-    if (!created.provider) {
-      errors.push(created.error ?? 'Nie udało się utworzyć dostawcy danych opcyjnych');
-      for (const item of toAnalyze) {
-        result.watchlistOnly.push({
-          symbol: item.symbol,
-          earningsDate: item.event.date,
-          daysToEarnings: item.daysToEarnings,
-          reason: 'brak działającego dostawcy opcji — analiza niemożliwa',
-        });
-      }
-      result.durationMs = Date.now() - started;
-      return result;
-    }
-    optionsAdapter = created.provider;
-  }
-
+  // ── 5. Kursy akcji ─────────────────────────────────────────────────────────
+  // Potrzebne do wyboru strike ATM. Dostawca opcji podaje kurs, gdy potrafi
+  // (tradier); gdy nie (tastytrade nie ma notowań na naszym poziomie uprawnień),
+  // bierzemy go z Finnhuba. Pytamy TYLKO o finalistów, więc to kilkanaście żądań.
   const historyAdapter = env.FINNHUB_API_KEY ? new FinnhubAdapter(env.FINNHUB_API_KEY) : undefined;
 
   // ── 6. Głęboka analiza ─────────────────────────────────────────────────────
-  // Równoległość 3: przy limiterze Tradier (55/min) daje ~3 żądania/s, czyli
-  // pełny przebieg dla 40 spółek to ~3-4 minuty. Mieści się w budżecie crona.
   const { results, errors: analysisErrors } = await mapLimit(toAnalyze, 3, async (item) => {
     return analyzeSymbol({
       item,
       universeEntry: universeBySymbol.get(item.symbol),
       optionsAdapter,
+      metrics: metricsBySymbol.get(item.symbol),
+      spotProvider: historyAdapter,
       historyAdapter,
       minOpenInterest: cfg.minOpenInterest,
       asOf,
@@ -311,7 +356,7 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
         symbol: item.symbol,
         earningsDate: item.event.date,
         daysToEarnings: item.daysToEarnings,
-        reason: 'analiza opcji nie zwróciła kandydata (brak łańcucha, brak wygaśnięć w oknie wyników albo brak wyceny)',
+        reason: 'analiza nie zwróciła kandydata (brak kursu, brak łańcucha, brak wygaśnięć w oknie wyników albo brak wyceny IV)',
       });
       continue;
     }
@@ -330,6 +375,13 @@ interface AnalyzeArgs {
   item: { symbol: string; event: EarningsEvent; daysToEarnings: number };
   universeEntry?: UniverseRow;
   optionsAdapter: OptionsProvider;
+  /** Metryki zmienności pobrane zbiorczo przed analizą (tastytrade). */
+  metrics?: SymbolMetrics;
+  /**
+   * Dostawca kursu akcji. Osobny od dostawcy opcji, bo tastytrade nie udostępnia
+   * notowań na naszym poziomie uprawnień — kurs bierzemy z Finnhuba.
+   */
+  spotProvider?: { quote(symbol: string): Promise<number | undefined> };
   historyAdapter?: FinnhubAdapter;
   minOpenInterest: number;
   asOf: string;
@@ -341,7 +393,12 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
   const { item, universeEntry, optionsAdapter, historyAdapter, minOpenInterest, asOf, env } = args;
   const symbol = item.symbol;
 
-  const spot = await optionsAdapter.quote(symbol);
+  // Kurs akcji: najpierw dostawca opcji (tradier go ma), potem Finnhub
+  // (tastytrade nie udostępnia notowań). Bez kursu nie wybierzemy strike ATM.
+  let spot = await optionsAdapter.quote(symbol);
+  if ((!spot || spot <= 0) && args.spotProvider) {
+    spot = await args.spotProvider.quote(symbol);
+  }
   if (!spot || spot <= 0) return undefined;
 
   const expirations = await optionsAdapter.expirations(symbol);
@@ -354,13 +411,10 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
   });
   if (legCandidates.length === 0) return undefined;
 
-  // Próbujemy kolejne układy nóg — pierwszy może mieć zerowy OI na ATM
-  // (np. w sandboxie brak notowań dla części terminów).
-  // Metryki zmienności od dostawcy (jeśli je ma). Dla tastytrade zawierają
-  // IV rank, percentyl i IV per wygaśnięcie — czyli term structure bez liczenia
-  // z cen. Pobieramy RAZ na spółkę, nie per noga.
-  let metrics: TastytradeMetrics | undefined;
-  if (optionsAdapter.marketMetrics) {
+  // Metryki zmienności: użyj tych pobranych zbiorczo, a gdy ich nie ma —
+  // dociągnij dla tej jednej spółki (tradier nie ma metryk wcale).
+  let metrics = args.metrics;
+  if (!metrics && optionsAdapter.marketMetrics) {
     try {
       metrics = await optionsAdapter.marketMetrics(symbol);
     } catch {

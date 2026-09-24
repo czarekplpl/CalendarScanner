@@ -36,6 +36,12 @@ interface FinnhubCalendarResponse {
   earningsCalendar?: FinnhubCalendarRow[];
 }
 
+interface FinnhubQuoteResponse {
+  c?: number; // cena bieżąca
+  pc?: number; // zamknięcie poprzedniej sesji
+  t?: number; // znacznik czasu
+}
+
 interface FinnhubSurpriseRow {
   actual?: number | null;
   estimate?: number | null;
@@ -90,6 +96,31 @@ export class FinnhubAdapter {
         epsEstimate: r.epsEstimate ?? undefined,
         revenueEstimate: r.revenueEstimate ?? undefined,
       }));
+  }
+
+  /**
+   * Kurs akcji — używany jako źródło SPOT, bo tastytrade nie udostępnia notowań
+   * na naszym poziomie uprawnień (`/market-data` zwraca 403).
+   *
+   * Dlaczego Finnhub, a nie inny dostawca: klucz już mamy (potrzebny i tak do
+   * kalendarza wyników), a `/quote` jest w darmowym planie i odpowiada szybko.
+   * Jedno zapytanie na spółkę, ale pytamy TYLKO o finalistów w oknie alertu
+   * (kilkanaście spółek na przebieg), więc zużycie jest znikome.
+   */
+  async quote(symbol: string): Promise<number | undefined> {
+    await this.limiter.acquire();
+    try {
+      const data = await fetchJson<FinnhubQuoteResponse>(
+        this.url('/quote', { symbol: symbol.toUpperCase() }),
+        { label: `finnhub.quote.${symbol}`, retries: 2 },
+      );
+      // c = 0 oznacza brak danych (Finnhub tak sygnalizuje nieznany symbol)
+      const price = typeof data.c === 'number' && data.c > 0 ? data.c : undefined;
+      return price;
+    } catch {
+      // Brak kursu nie może wywalić skanu — spółka po prostu wypadnie z analizy
+      return undefined;
+    }
   }
 
   /** Historia wyników spółki (ostatnie kwartały). */

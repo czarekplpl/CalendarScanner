@@ -147,12 +147,19 @@ async function main(): Promise<void> {
 
   const devVars = loadDevVars();
 
+  // Sekrety bierzemy z .dev.vars (ten sam plik, który wgrywa setup-cloudflare.sh),
+  // więc nie trzeba ich wpisywać dwa razy. Wartości sterujące mają domyślne,
+  // spójne z wrangler.toml.
   const env: Env = {
     FINNHUB_API_KEY: devVars.FINNHUB_API_KEY,
     TRADIER_API_KEY: devVars.TRADIER_API_KEY,
+    TASTYTRADE_CLIENT_ID: devVars.TASTYTRADE_CLIENT_ID,
+    TASTYTRADE_CLIENT_SECRET: devVars.TASTYTRADE_CLIENT_SECRET,
+    TASTYTRADE_REFRESH_TOKEN: devVars.TASTYTRADE_REFRESH_TOKEN,
     EARNINGS_PROVIDER: devVars.EARNINGS_PROVIDER ?? 'finnhub',
-    OPTIONS_PROVIDER: devVars.OPTIONS_PROVIDER ?? 'tradier',
+    OPTIONS_PROVIDER: devVars.OPTIONS_PROVIDER ?? 'tastytrade',
     TRADIER_ENV: devVars.TRADIER_ENV ?? 'sandbox',
+    TASTYTRADE_ENV: devVars.TASTYTRADE_ENV ?? 'production',
     ALERT_MIN_DAYS: devVars.ALERT_MIN_DAYS ?? '25',
     ALERT_MAX_DAYS: devVars.ALERT_MAX_DAYS ?? '45',
     MAX_DEEP_ANALYSIS: devVars.MAX_DEEP_ANALYSIS ?? '25',
@@ -161,11 +168,20 @@ async function main(): Promise<void> {
   };
 
   if (!env.FINNHUB_API_KEY) {
-    console.error('BŁĄD: brak FINNHUB_API_KEY w .dev.vars');
+    console.error('BŁĄD: brak FINNHUB_API_KEY w .dev.vars (potrzebny do kalendarza wyników i kursów akcji)');
     process.exit(1);
   }
-  if (!env.TRADIER_API_KEY) {
-    console.error('BŁĄD: brak TRADIER_API_KEY w .dev.vars');
+  // Sprawdzamy poświadczenia TEGO dostawcy, który jest wybrany — brak kluczy
+  // drugiego dostawcy nie może blokować skanu.
+  if (env.OPTIONS_PROVIDER === 'tastytrade') {
+    if (!env.TASTYTRADE_CLIENT_SECRET || !env.TASTYTRADE_REFRESH_TOKEN) {
+      console.error(
+        'BŁĄD: OPTIONS_PROVIDER=tastytrade, ale brak TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN w .dev.vars',
+      );
+      process.exit(1);
+    }
+  } else if (!env.TRADIER_API_KEY) {
+    console.error('BŁĄD: OPTIONS_PROVIDER=tradier, ale brak TRADIER_API_KEY w .dev.vars');
     process.exit(1);
   }
 

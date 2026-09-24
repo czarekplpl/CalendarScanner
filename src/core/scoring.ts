@@ -246,16 +246,31 @@ export function scoreLiquidity(
   const minOi = Math.min(front.atmOpenInterest, back.atmOpenInterest);
   const worstSpread = Math.max(front.atmSpreadPct, back.atmSpreadPct);
 
+  // ── SPREAD ────────────────────────────────────────────────────────────────
+  // KLUCZOWE ROZRÓŻNIENIE: `atmSpreadPct === 1` NIE znaczy „spread 100%", tylko
+  // „nie wiemy". Niektórzy dostawcy (tastytrade na naszym poziomie uprawnień)
+  // nie udostępniają notowań, więc spreadu po prostu nie ma z czego policzyć.
+  //
+  // Traktowanie braku danych jak bardzo szerokiego spreadu byłoby podwójnym
+  // błędem: karałoby kandydatów za to, jakiego dostawcę wybrał użytkownik,
+  // i wpychało WSZYSTKICH w cięcie krytyczne (ocena 40), przez co ranking
+  // przestawał cokolwiek różnicować. Dlatego brak danych = punktów neutralnie
+  // (połowa puli na spread), a nie zero.
+  const spreadUnknown = worstSpread >= 0.99;
+  const spreadPoints = spreadUnknown
+    ? max * 0.4 * 0.5
+    : clamp((0.12 - worstSpread) / (0.12 - 0.015), 0, 1) * max * 0.4;
+
+  // ── OPEN INTEREST ─────────────────────────────────────────────────────────
   // OI: pełne punkty od 3x progu, zero poniżej progu.
   const oiRatio = minOi / Math.max(minOpenInterest, 1);
   const oiPoints = clamp((oiRatio - 1) / 2, 0, 1) * max * 0.6;
 
-  // Spread: pełne punkty <= 1.5% mid, zero >= 12%.
-  const spreadPoints = clamp((0.12 - worstSpread) / (0.12 - 0.015), 0, 1) * max * 0.4;
-
   const notes = [
     `OI ATM min(front, back) = ${minOi} kontraktów${minOi < minOpenInterest ? ` — poniżej progu ${minOpenInterest}, struktura trudna do zbudowania` : ''}.`,
-    `Najgorszy spread ATM ${(worstSpread * 100).toFixed(1)}% mid.`,
+    spreadUnknown
+      ? 'Spread bid-ask niedostępny u tego dostawcy (brak notowań opcji) — ocena neutralna, zweryfikuj spread u brokera przed wejściem.'
+      : `Najgorszy spread ATM ${(worstSpread * 100).toFixed(1)}% mid.`,
   ];
 
   return {
@@ -292,10 +307,16 @@ export function scoreIvRank(ivRank: number | undefined): ScoreComponent {
 }
 
 /** Zbiera flagi i ostrzeżenia na podstawie danych i wyniku punktowego. */
+/**
+ * `spreadDataMissing` mówi, że dostawca nie udostępnia notowań opcji, więc
+ * spreadu bid-ask nie da się policzyć. Rozróżnienie „brak danych" od „zły spread"
+ * jest istotne: pierwsze nie może obniżać oceny ani być problemem krytycznym.
+ */
 export function buildFlagsAndWarnings(
   input: ScoreInput,
   daysFromFrontExpiryToEarnings: number,
   score: number,
+  spreadDataMissing: boolean,
 ): { flags: string[]; warnings: string[] } {
   const flags: string[] = [];
   const warnings: string[] = [];
@@ -328,8 +349,13 @@ export function buildFlagsAndWarnings(
   if (d > 25) {
     warnings.push('Front wygasa bardzo wcześnie przed wynikami — premia eventowa jeszcze nie napłynęła; rozważ późniejsze wygaśnięcie.');
   }
-  if (input.front.atmSpreadPct > 0.08 || input.back.atmSpreadPct > 0.08) {
+  if (!spreadDataMissing && (input.front.atmSpreadPct > 0.08 || input.back.atmSpreadPct > 0.08)) {
     warnings.push('Szeroki spread bid-ask na strike ATM — wejście i wyjście zjedzą część zysku.');
+  }
+  if (spreadDataMissing) {
+    warnings.push(
+      'Spread bid-ask nieznany (dostawca nie udostępnia notowań opcji) — sprawdź płynność u swojego brokera przed wejściem.',
+    );
   }
   if (input.front.atmOpenInterest < minOi || input.back.atmOpenInterest < minOi) {
     warnings.push(`Niski open interest ATM (front ${input.front.atmOpenInterest}, back ${input.back.atmOpenInterest}) — ryzyko, że nie zbudujesz i nie zamkniesz struktury po godziwej cenie.`);
@@ -368,7 +394,11 @@ export function scoreCandidate(input: ScoreInput): CalendarCandidate {
   const rawScore = components.reduce((sum, c) => sum + c.points, 0);
   let score = Math.round(clamp((rawScore / MAX_SCORE) * 100, 0, 100));
 
-  const { flags, warnings } = buildFlagsAndWarnings(input, daysFromFrontToEarnings, score);
+  // Czy dostawca w ogóle podaje spread bid-ask? Wartość 1 to nasz znacznik braku
+  // danych (patrz core/pricing.ts) — patrz komentarz w buildFlagsAndWarnings.
+  const spreadDataMissing = input.front.atmSpreadPct >= 0.99 || input.back.atmSpreadPct >= 0.99;
+
+  const { flags, warnings } = buildFlagsAndWarnings(input, daysFromFrontToEarnings, score, spreadDataMissing);
 
   // ── Twarde ograniczenie: krytyczne problemy ścinają ocenę ──────────────────
   // Powód: suma punktów mogłaby wypromować układ, którego nie należy brać.
@@ -378,8 +408,10 @@ export function scoreCandidate(input: ScoreInput): CalendarCandidate {
     (daysFromFrontToEarnings <= -4 && !input.earnings.confirmed) ||
     Math.min(input.front.atmOpenInterest, input.back.atmOpenInterest) < (input.minOpenInterest ?? 100) ||
     input.back.atmIv - input.front.atmIv < -0.04 ||
-    input.front.atmSpreadPct > 0.15 ||
-    input.back.atmSpreadPct > 0.15;
+    // Sprawdzenie spreadu tylko wtedy, gdy spread JEST ZNANY. Wartość 1 to
+    // nasz znacznik "brak danych" — karanie za nią wszystkich kandydatów
+    // od dostawcy bez notowań zrównałoby ich oceny z dołem skali.
+    (!spreadDataMissing && (input.front.atmSpreadPct > 0.15 || input.back.atmSpreadPct > 0.15));
 
   if (critical) score = Math.min(score, MAX_CRITICAL_SCORE);
 

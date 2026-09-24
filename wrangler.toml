@@ -30,7 +30,7 @@ EARNINGS_PROVIDER = "finnhub"
 # "tradier"    — prostszy (jeden klucz API, rejestracja bez formalności),
 #                ale NIE zwraca greków ani IV w sandboxie — liczymy sami,
 #                a IV rank wymaga ~60 dni własnej historii.
-OPTIONS_PROVIDER = "tradier"
+OPTIONS_PROVIDER = "tastytrade"
 
 # "sandbox" (darmowy, opóźniony) albo "production" (konto w Tradier, real-time + greki)
 TRADIER_ENV = "sandbox"
@@ -40,7 +40,7 @@ TRADIER_ENV = "sandbox"
 # Poświadczenia zdobywasz na my.tastytrade.com -> Manage -> My Profile -> API
 # -> OAuth Applications (+ New OAuth client, potem Create Grant => refresh token).
 # Zakresy read/trade wymagają włączonego 2FA na koncie.
-TASTYTRADE_ENV = "sandbox"
+TASTYTRADE_ENV = "production"
 
 # ── Progi skanowania ─────────────────────────────────────────────────────────
 # Okno alertu: skanuj wyników, które wypadają między MIN a MAX dni od dziś.
