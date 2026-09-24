@@ -7,6 +7,7 @@ dist/
 # .dev.vars* łapie też warianty środowiskowe (.dev.vars.production itd.)
 .dev.vars
 .dev.vars.*
+!.dev.vars.example
 .env
 .env.*
 .cloudflare.env

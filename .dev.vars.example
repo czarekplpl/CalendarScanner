@@ -1,0 +1,55 @@
+# =============================================================================
+# SEKRETY SKANERA — plik lokalny, NIE trafia do GitHuba (.gitignore)
+# =============================================================================
+#
+# Wypełnij wartości poniżej, a potem użyj tego pliku na dwa sposoby:
+#   1. lokalnie:  npm run scan:local        (test na prawdziwych danych)
+#   2. w chmurze: ./setup-cloudflare.sh     (wgrywa te sekrety do Cloudflare)
+#
+# Ten sam plik obsługuje oba przypadki, więc nie musisz wpisywać nic dwa razy.
+
+# ── WYMAGANE ─────────────────────────────────────────────────────────────────
+
+# Kalendarz wyników. Darmowe konto: https://finnhub.io/register
+# UWAGA: ten sam klucz może działać równolegle w wielu miejscach (limit jest
+# liczony na konto, nie na urządzenie). Jeśli masz już działający skaner na
+# serwerze, spokojnie użyj tego samego klucza — nasz skaner zużywa ~6 zapytań
+# na dobę. NIE regeneruj klucza, bo unieważnisz tamten skaner.
+FINNHUB_API_KEY=
+
+# Dane opcyjne. Wybierz JEDNEGO dostawcę (patrz OPTIONS_PROVIDER w wrangler.toml):
+#
+# Opcja A — Tradier: jedno pole, rejestracja e-mailem. Sandbox nie zwraca
+# greków ani IV, więc skaner liczy je sam, a IV rank działa po ~60 dniach.
+#   https://developer.tradier.com/
+TRADIER_API_KEY=
+#
+# Opcja B — tastytrade: 4 pola, ale daje IV rank i IV per wygaśnięcie WPROST
+# z API, więc skaner działa w pełni od pierwszego dnia. Wymaga 2FA na koncie.
+#   my.tastytrade.com -> Manage -> My Profile -> API -> OAuth Applications
+#   (+ New OAuth client => Client ID i Client Secret, potem Create Grant => refresh token)
+TASTYTRADE_CLIENT_ID=
+TASTYTRADE_CLIENT_SECRET=
+TASTYTRADE_REFRESH_TOKEN=
+
+# Hasło chroniące endpointy /api/* Twojego Workera. Wymyśl dowolny długi ciąg.
+# Wygenerujesz tak:  head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 40
+API_KEY=
+
+# ── ALERTY (opcjonalne, ale bez nich nie dostaniesz powiadomień) ─────────────
+
+# Telegram: napisz do @BotFather -> /newbot, potem wklej token tutaj.
+TELEGRAM_BOT_TOKEN=
+# Twój chat_id. Najprościej: napisz cokolwiek do swojego bota, a potem otwórz
+# https://api.telegram.org/bot<TWOJ_TOKEN>/getUpdates i poszukaj "chat":{"id":...
+TELEGRAM_CHAT_ID=
+
+# E-mail przez Brevo API v3. UWAGA: potrzebny klucz API (xkeysib-...),
+# NIE klucz SMTP (xsmtpsib-...) — ten drugi jest odrzucany przez API.
+#   https://app.brevo.com/settings/keys/api  (zakładka "API Keys")
+BREVO_API_KEY=
+
+# Nadawca musi być zweryfikowany u dostawcy (Brevo: Senders -> Add a sender).
+# Format z nazwą jest obsługiwany: "Skaner <adres@domena>"
+ALERT_EMAIL_TO=
+ALERT_EMAIL_FROM=
