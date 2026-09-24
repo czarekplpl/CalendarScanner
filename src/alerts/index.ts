@@ -118,11 +118,27 @@ export function formatAlertHtml(c: CalendarCandidate, variant: 'telegram' | 'ema
   }
 
   if (variant === 'email') {
+    // Stopka MUSI mówić prawdę o świeżości danych. Wcześniej była tu wzmianka
+    // o sandboxie Tradiera, którego nie używamy — a realne ograniczenie jest inne:
+    // IV z tastytrade aktualizuje się raz dziennie, PO zamknięciu sesji (pole
+    // implied-volatility-updated-at). Intraday te liczby się nie zmieniają.
     lines.push(
-      '<hr><i>Narzędzie analityczne, nie rekomendacja inwestycyjna. ' +
-        'Dane opcyjne z sandboxa są opóźnione 15 minut.</i>',
+      '<hr style="border:none;border-top:1px solid #d0d7de;margin:16px 0">' +
+        '<span style="color:#57606a;font-size:12px">' +
+        'Narzędzie analityczne, nie rekomendacja inwestycyjna. ' +
+        'Zmienność implikowana pochodzi z dziennego odczytu po zamknięciu sesji — ' +
+        'przed wejściem zweryfikuj IV i spread u swojego brokera.' +
+        '</span>',
     );
-    return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;line-height:1.6;color:#e6e6e6;background:#0f1115;padding:16px">${lines.join('<br>')}</div>`;
+    // Jasny motyw: ciemne tło bywa obcinane przez klientów pocztowych i źle
+    // wygląda w większości skrzynek. Białe tło z ciemnym tekstem czyta się
+    // naturalnie i nie zależy od ustawień klienta.
+    return (
+      '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;' +
+      'font-size:14px;line-height:1.65;color:#1f2328;background:#ffffff;padding:20px;max-width:760px">' +
+      lines.join('<br>') +
+      '</div>'
+    );
   }
   return lines.join('\n');
 }

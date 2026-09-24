@@ -10,12 +10,23 @@ compatibility_date = "2025-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CRON — dwa przebiegi dziennie (UTC)
-# 21:10 UTC = po zamknięciu sesji US (17:10 ET latem, 16:10 ET zimą)
-# 11:10 UTC = przed otwarciem (7:10 ET) — wyłapuje zmiany daty wyników
+# CRON — JEDEN przebieg dziennie, po otwarciu sesji US
+#
+# 14:30 UTC = 10:30 czasu Nowego Jorku (rano, 1 h po otwarciu sesji o 9:30 ET).
+#
+# DLACZEGO PO OTWARCIU, A NIE PRZED: dane zmienności z tastytrade aktualizują się
+# raz dziennie, PO zamknięciu sesji (pole implied-volatility-updated-at pokazuje
+# ~19:50 UTC dnia poprzedniego). Uruchomienie po otwarciu gwarantuje, że raport
+# zawiera NAJŚWIEŻSZY dostępny odczyt IV, a nie ten sprzed dwóch sesji.
+#
+# UWAGA O CZASIE LETNIM/ZIMOWYM: 14:30 UTC to 10:30 EDT latem i 9:30 EST zimą.
+# Strefa US przesuwa się względem UTC, więc stała godzina UTC daje w zimie
+# uruchomienie dokładnie w momencie otwarcia. Jeśli wolisz zawsze 10:30 ET,
+# zmień na "30 14,15 * * 1-5" i wybierz właściwą godzinę — albo zostaw jedno
+# uruchomienie, bo różnica to maksymalnie godzina.
 # ─────────────────────────────────────────────────────────────────────────────
 [triggers]
-crons = ["10 11 * * 1-5", "10 21 * * 1-5"]
+crons = ["30 14 * * 1-5"]
 
 [vars]
 # ── Dostawcy danych ──────────────────────────────────────────────────────────
