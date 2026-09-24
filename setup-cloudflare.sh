@@ -18,7 +18,8 @@
 #        API_KEY=dlugi_losowy_ciag
 #        TELEGRAM_BOT_TOKEN=123:ABC        # opcjonalnie
 #        TELEGRAM_CHAT_ID=-100123          # opcjonalnie
-#        RESEND_API_KEY=re_xxx             # opcjonalnie
+#        RESEND_API_KEY=re_xxx             # opcjonalnie (EMAIL_PROVIDER=resend)
+#        BREVO_API_KEY=xkeysib-xxx         # opcjonalnie (domyślny dostawca e-mail)
 #
 #   2. Uruchom:
 #
@@ -90,8 +91,14 @@ if [[ "$channels" == *telegram* ]]; then
     || warn "ALERT_CHANNELS zawiera 'telegram', ale brak TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID w .dev.vars — alerty na Telegram nie zadziałają."
 fi
 if [[ "$channels" == *email* ]]; then
-  grep -qE '^RESEND_API_KEY=.+' .dev.vars \
-    || warn "ALERT_CHANNELS zawiera 'email', ale brak RESEND_API_KEY w .dev.vars — alerty e-mail nie zadziałają."
+  # Sprawdzamy oba dostawców: EMAIL_PROVIDER wskazuje jednego, a przy braku zmiennej
+  # (domyślnie brevo) skaner zejdzie na tego, który ma klucz. Ostrzeżenie ma się
+  # pojawić tylko wtedy, gdy nie ma ŻADNEGO klucza — inaczej myliłoby przy konfiguracji Brevo.
+  email_key=""
+  grep -qE '^BREVO_API_KEY=.+' .dev.vars && email_key=brevo
+  grep -qE '^RESEND_API_KEY=.+' .dev.vars && email_key=${email_key:-resend}
+  [[ -n "$email_key" ]] \
+    || warn "ALERT_CHANNELS zawiera 'email', ale brak BREVO_API_KEY (albo RESEND_API_KEY) w .dev.vars — alerty e-mail nie zadziałają."
 fi
 
 # ── 2. Logowanie do Cloudflare ───────────────────────────────────────────────

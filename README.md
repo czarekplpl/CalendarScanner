@@ -226,6 +226,12 @@ API_KEY=dowolny_dlugi_losowy_ciag
 # Opcjonalne — tylko dla kanałów, które chcesz mieć
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 TELEGRAM_CHAT_ID=-1001234567890
+
+# E-mail: dostawcę wybiera EMAIL_PROVIDER ("brevo" albo "resend"; domyślnie brevo).
+# Brevo wymaga klucza API v3 (xkeysib-...), NIE klucza SMTP (xsmtpsib-...) — patrz tabela wyżej.
+EMAIL_PROVIDER=brevo
+BREVO_API_KEY=xkeysib-xxxxxxxx
+# Resend zostaje jako alternatywa (EMAIL_PROVIDER=resend):
 RESEND_API_KEY=re_xxxxxxxx
 ```
 
