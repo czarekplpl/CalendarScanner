@@ -18,6 +18,10 @@ dist/
 # Wyniki lokalnych skanów
 test-output/
 
+# Python
+__pycache__/
+*.pyc
+
 # Systemowe
 .DS_Store
 *.log
