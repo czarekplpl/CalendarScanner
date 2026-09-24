@@ -71,10 +71,12 @@ ALERT_CHANNELS = "dashboard,telegram,email"
 # UWAGA: klucz SMTP z Brevo (prefiks xsmtpsib-) NIE działa z API v3 — zwraca 401.
 EMAIL_PROVIDER = "resend"
 
-# Odbiorca alertów; nadawca musi być zweryfikowany u dostawcy (Brevo: nadawcy z listy
-# "Senders", Resend: własna domena). Dozwolony format z nazwą: "Skaner <adres@domena>".
+# Odbiorca alertów. Nadawca: "onboarding@resend.dev" działa BEZ weryfikacji domeny
+# (adres testowy Resenda). Po weryfikacji własnej domeny zamień go na adres w tej
+# domenie — dzięki temu nadawca wygląda profesjonalnie i można wysyłać na dowolne adresy.
+# Dozwolony format z nazwą: "Skaner <adres@domena>".
 ALERT_EMAIL_TO = "unplcn@gmail.com"
-ALERT_EMAIL_FROM = "wesley@wesleyoptions.pl"
+ALERT_EMAIL_FROM = "onboarding@resend.dev"
 
 # ── Bezpieczeństwo ───────────────────────────────────────────────────────────
 # Żądania do /api/* wymagają nagłówka x-api-key = API_KEY (ustaw jako sekret).

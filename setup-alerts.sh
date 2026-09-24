@@ -147,39 +147,50 @@ if [[ "$provider" == "resend" ]]; then
    Klucz: https://resend.com/api-keys -> Create API Key -> uprawnienie \"Sending access\"
    Dopisz do .dev.vars jako RESEND_API_KEY i uruchom skrypt ponownie."
   else
-    echo "   Sprawdzam klucz u Resend..."
-    http=$(curl -s -o /tmp/resend-domains.json -w "%{http_code}" --max-time 20 \
-      -H "Authorization: Bearer ${resend_key}" https://api.resend.com/domains || echo "000")
-    case "$http" in
-      200) ok "Klucz Resend działa" ;;
-      401) fail "Resend odrzucił klucz (HTTP 401). Skopiuj CAŁY klucz z https://resend.com/api-keys
-(pokazuje się tylko raz — jeśli go zgubiłeś, utwórz nowy)." ;;
-      403) warn "Klucz działa, ale bez dostępu do listy domen. To NIE blokuje wysyłki —
-     zweryfikuj domenę ręcznie w https://resend.com/domains" ;;
-      000) warn "Nie udało się połączyć z Resend — sprawdzę przy wysyłce alertu." ;;
-      *) warn "Resend odpowiedziało HTTP ${http} przy sprawdzaniu klucza." ;;
-    esac
-
-    # Domena nadawcy MUSI być zweryfikowana, inaczej wysyłka zwraca 403.
+    # WERYFIKACJA KLUCZA — przez endpoint WYSYŁKI, nie przez /domains.
+    #
+    # Pułapka, na którą się nadziałem: klucz z uprawnieniem "Sending access"
+    # (właśnie taki zalecamy, bo minimalny) NIE MA dostępu do GET /domains i to
+    # API zwraca na nim 401 z komunikatem "This API key is restricted to only
+    # send emails". Traktowanie tego jako błędu klucza było mylące — klucz był
+    # poprawny, tylko pytaliśmy go o coś, do czego nie służy.
+    #
+    # Właściwy test: spróbować wysłać na adres testowy Resenda. API rozróżnia
+    # dwie sytuacje i obie są dla nas informatywne:
+    #   200        -> klucz działa ORAZ domena nadawcy jest zweryfikowana
+    #   403 z "not verified" -> klucz działa, ale domena wymaga weryfikacji
     from_check="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
+    from_check="${from_check:-onboarding@resend.dev}"
     domena="${from_check##*@}"
-    if [[ -n "$domena" && "$domena" != *twojadomena* ]]; then
-      if python3 -c "
-import json,sys
-try:
-    d=json.load(open('/tmp/resend-domains.json'))
-    zw=[x['name'].lower() for x in (d.get('data') or []) if x.get('status')=='verified']
-    sys.exit(0 if '$domena'.lower() in zw else 1)
-except Exception:
-    sys.exit(2)
-" 2>/dev/null; then
-        ok "Domena ${domena} zweryfikowana w Resend"
-      else
-        warn "Domena '${domena}' NIE wygląda na zweryfikowaną w Resend.
-     Dodaj: https://resend.com/domains -> Add Domain, potem wklej rekordy DNS (SPF/DKIM)
-     u rejestratora domeny. Bez tego wysyłka zwróci 403."
-      fi
-    fi
+
+    echo "   Sprawdzam klucz i domenę nadawcy (${domena})..."
+    http=$(curl -s -o /tmp/resend-send.json -w "%{http_code}" --max-time 20 \
+      -X POST https://api.resend.com/emails \
+      -H "Authorization: Bearer ${resend_key}" -H "Content-Type: application/json" \
+      -d "{\"from\":\"${from_check}\",\"to\":[\"delivered@resend.dev\"],\"subject\":\"Weryfikacja konfiguracji skanera\",\"html\":\"<p>Test konfiguracji. Ten adres należy do Resend i nie trafia do skrzynki.</p>\"}" \
+      || echo "000")
+
+    case "$http" in
+      200)
+        ok "Klucz Resend działa, domena ${domena} zweryfikowana (wysyłka przetestowana)" ;;
+      401)
+        fail "Resend odrzucił klucz (HTTP 401): $(head -c 150 /tmp/resend-send.json)
+Skopiuj CAŁY klucz z https://resend.com/api-keys (pokazuje się tylko raz)." ;;
+      403)
+        if grep -qi "not verified\|domain" /tmp/resend-send.json 2>/dev/null; then
+          warn "Klucz działa, ale domena '${domena}' NIE jest jeszcze zweryfikowana.
+     Dodaj ją: https://resend.com/domains -> Add Domain, potem wklej rekordy DNS
+     (SPF i DKIM) u rejestratora domeny i poczekaj na status Verified.
+     Odpowiedź Resenda: $(head -c 150 /tmp/resend-send.json)"
+        else
+          warn "Resend zwróciło 403: $(head -c 150 /tmp/resend-send.json)"
+        fi ;;
+      422)
+        warn "Resend odrzucił nadawcę '${from_check}' jako nieprawidłowy (HTTP 422).
+     Sprawdź, czy adres w ALERT_EMAIL_FROM należy do zweryfikowanej domeny." ;;
+      000) warn "Nie udało się połączyć z Resend — sprawdzę przy wysyłce alertu." ;;
+      *) warn "Resend odpowiedziało HTTP ${http}: $(head -c 150 /tmp/resend-send.json)" ;;
+    esac
   fi
 
 else
