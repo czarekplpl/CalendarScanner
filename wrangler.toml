@@ -69,7 +69,7 @@ ALERT_CHANNELS = "dashboard,telegram,email"
 # Dostawca wysyłki: "brevo" (domyślnie) albo "resend".
 # Brevo wymaga sekretu BREVO_API_KEY = klucz API v3 (zakładka "API Keys", prefiks xkeysib-).
 # UWAGA: klucz SMTP z Brevo (prefiks xsmtpsib-) NIE działa z API v3 — zwraca 401.
-EMAIL_PROVIDER = "brevo"
+EMAIL_PROVIDER = "resend"
 
 # Odbiorca alertów; nadawca musi być zweryfikowany u dostawcy (Brevo: nadawcy z listy
 # "Senders", Resend: własna domena). Dozwolony format z nazwą: "Skaner <adres@domena>".

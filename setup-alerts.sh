@@ -115,67 +115,123 @@ ok "TELEGRAM_CHAT_ID zapisany: ${chat_id}"
 
 echo
 echo "${BOLD}=== 2. E-MAIL (opcjonalnie) ===${RESET}"
-brevo="$(get_var BREVO_API_KEY)"
-if [[ -z "$brevo" ]]; then
-  warn "Brak BREVO_API_KEY — alerty e-mail będą pominięte, Telegram zadziała.
-   Klucz API v3 (zaczyna się od 'xkeysib-') pobierzesz z:
-     https://app.brevo.com/settings/keys/api   (zakładka API Keys, NIE SMTP)
-   Wklej go do .dev.vars jako BREVO_API_KEY i uruchom skrypt ponownie."
-else
-  case "$brevo" in
-    xsmtpsib-*) fail "BREVO_API_KEY to klucz SMTP (xsmtpsib-...), a API v3 wymaga klucza 'xkeysib-...'.
-Wejdź na https://app.brevo.com/settings/keys/api -> zakładka API Keys -> Generate a new API key.
-UWAGA: to INNA zakładka niż 'SMTP'. Klucz SMTP służy do wysyłki przez klienta pocztowego,
-a nie przez API — Cloudflare Workers nie umie wysyłać po SMTP." ;;
-  esac
 
-  # Sprawdzamy klucz U DOSTAWCY, zamiast czekać na błąd przy pierwszym alercie.
-  # Oszczędza to sytuację, w której alerty "działają", a maile po cichu nie dochodzą.
-  echo "   Sprawdzam klucz u Brevo..."
-  http=$(curl -s -o /tmp/brevo-check.json -w "%{http_code}" --max-time 20 \
-    -H "api-key: ${brevo}" https://api.brevo.com/v3/account || echo "000")
-  case "$http" in
-    200) ok "Klucz Brevo działa (konto aktywne)" ;;
-    401) fail "Brevo odrzucił klucz (HTTP 401: $(head -c 120 /tmp/brevo-check.json)).
-Sprawdź, czy skopiowałeś CAŁY klucz z zakładki API Keys." ;;
-    000) warn "Nie udało się połączyć z Brevo — sprawdzę działanie przy wysyłce alertu." ;;
-    *) warn "Brevo odpowiedziało HTTP ${http} przy sprawdzaniu klucza — sprawdź uprawnienia klucza." ;;
-  esac
+# Dostawcę wybiera EMAIL_PROVIDER w .email-config (albo zostaje domyślny z wrangler.toml).
+# Resend NIE MA blokady IP, więc jest prostszy, gdy Brevo wymaga autoryzacji adresów IP.
+provider=""
+if [[ -f .email-config ]]; then
+  provider="$(grep -E '^EMAIL_PROVIDER=' .email-config | head -1 | cut -d= -f2- | tr -d ' \r')"
+fi
+if [[ -z "$provider" ]]; then
+  provider="$(grep -E '^EMAIL_PROVIDER' wrangler.toml | head -1 | cut -d'"' -f2)"
+fi
+provider="${provider:-brevo}"
+if [[ "$provider" != "brevo" && "$provider" != "resend" ]]; then
+  fail "EMAIL_PROVIDER musi być \"brevo\" albo \"resend\" (jest: \"${provider}\")."
+fi
+echo "   Dostawca: ${BOLD}${provider}${RESET}"
 
-  # Nadawca musi być ZWERYFIKOWANY u Brevo, inaczej API zwróci 400 przy wysyłce.
-  from_check="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
-  if [[ -n "$from_check" && "$from_check" != *twojadomena* ]]; then
-    curl -s --max-time 20 -H "api-key: ${brevo}" "https://api.brevo.com/v3/senders" -o /tmp/brevo-senders.json || true
-    if python3 -c "
+# Wpisz wybranego dostawcę do wrangler.toml, żeby Worker wiedział, którym kluczem wysyłać.
+python3 - "$provider" <<'PYPROV'
+import pathlib, re, sys
+prov = sys.argv[1]
+p = pathlib.Path('wrangler.toml'); s = p.read_text()
+p.write_text(re.sub(r'^EMAIL_PROVIDER = .*$', f'EMAIL_PROVIDER = "{prov}"', s, flags=re.M))
+PYPROV
+
+if [[ "$provider" == "resend" ]]; then
+  # ── RESEND ────────────────────────────────────────────────────────────────
+  resend_key="$(get_var RESEND_API_KEY)"
+  if [[ -z "$resend_key" ]]; then
+    warn "Brak RESEND_API_KEY — alerty e-mail pominięte, Telegram zadziała.
+   Klucz: https://resend.com/api-keys -> Create API Key -> uprawnienie \"Sending access\"
+   Dopisz do .dev.vars jako RESEND_API_KEY i uruchom skrypt ponownie."
+  else
+    echo "   Sprawdzam klucz u Resend..."
+    http=$(curl -s -o /tmp/resend-domains.json -w "%{http_code}" --max-time 20 \
+      -H "Authorization: Bearer ${resend_key}" https://api.resend.com/domains || echo "000")
+    case "$http" in
+      200) ok "Klucz Resend działa" ;;
+      401) fail "Resend odrzucił klucz (HTTP 401). Skopiuj CAŁY klucz z https://resend.com/api-keys
+(pokazuje się tylko raz — jeśli go zgubiłeś, utwórz nowy)." ;;
+      403) warn "Klucz działa, ale bez dostępu do listy domen. To NIE blokuje wysyłki —
+     zweryfikuj domenę ręcznie w https://resend.com/domains" ;;
+      000) warn "Nie udało się połączyć z Resend — sprawdzę przy wysyłce alertu." ;;
+      *) warn "Resend odpowiedziało HTTP ${http} przy sprawdzaniu klucza." ;;
+    esac
+
+    # Domena nadawcy MUSI być zweryfikowana, inaczej wysyłka zwraca 403.
+    from_check="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
+    domena="${from_check##*@}"
+    if [[ -n "$domena" && "$domena" != *twojadomena* ]]; then
+      if python3 -c "
 import json,sys
 try:
-    d=json.load(open('/tmp/brevo-senders.json'))
-    aktywni=[s['email'].lower() for s in (d.get('senders') or []) if s.get('active')]
-    sys.exit(0 if '$from_check'.lower() in aktywni else 1)
+    d=json.load(open('/tmp/resend-domains.json'))
+    zw=[x['name'].lower() for x in (d.get('data') or []) if x.get('status')=='verified']
+    sys.exit(0 if '$domena'.lower() in zw else 1)
 except Exception:
     sys.exit(2)
 " 2>/dev/null; then
-      ok "Nadawca ${from_check} jest zweryfikowany u Brevo"
-    else
-      warn "Nadawca '${from_check}' NIE wygląda na zweryfikowanego u Brevo.
-     Dodaj go tutaj: https://app.brevo.com/senders -> Add a sender (potwierdź link z maila),
-     inaczej wysyłka zwróci błąd 400."
+        ok "Domena ${domena} zweryfikowana w Resend"
+      else
+        warn "Domena '${domena}' NIE wygląda na zweryfikowaną w Resend.
+     Dodaj: https://resend.com/domains -> Add Domain, potem wklej rekordy DNS (SPF/DKIM)
+     u rejestratora domeny. Bez tego wysyłka zwróci 403."
+      fi
     fi
   fi
-  # Adresy e-mail to KONFIGURACJA ([vars] w wrangler.toml), nie sekrety — trzymanie
-  # ich w .dev.vars powoduje kolizję nazw i odrzucenie przez Cloudflare.
-  #
-  # Można je podać na dwa sposoby:
-  #   1. plik .email-config w katalogu projektu (zalecane — nie wymaga edycji TOML):
-  #        ALERT_EMAIL_TO=ja@example.com
-  #        ALERT_EMAIL_FROM=zweryfikowany@twojadomena.pl
-  #   2. ręcznie w wrangler.toml (skrypt wtedy nic nie zmienia)
-  if [[ -f .email-config ]]; then
-    cfg_to="$(grep -E '^ALERT_EMAIL_TO=' .email-config | head -1 | cut -d= -f2- | tr -d ' \r')"
-    cfg_from="$(grep -E '^ALERT_EMAIL_FROM=' .email-config | head -1 | cut -d= -f2- | tr -d ' \r')"
 
-    if [[ -n "$cfg_to" ]]; then
-      python3 - "$cfg_to" "$cfg_from" <<'PYCFG'
+else
+  # ── BREVO ────────────────────────────────────────────────────────────────
+  brevo="$(get_var BREVO_API_KEY)"
+  if [[ -z "$brevo" ]]; then
+    warn "Brak BREVO_API_KEY — alerty e-mail pominięte, Telegram zadziała.
+   Klucz API v3 (prefiks xkeysib-): https://app.brevo.com/settings/keys/api
+   UWAGA: zakładka \"API Keys\", NIE \"SMTP\"."
+  else
+    case "$brevo" in
+      xsmtpsib-*) fail "BREVO_API_KEY to klucz SMTP (xsmtpsib-...), a API v3 wymaga klucza xkeysib-....\nWejdź na https://app.brevo.com/settings/keys/api -> zakładka API Keys. Klucz SMTP służy\ndo klienta pocztowego — Cloudflare Workers nie umie wysyłać po SMTP." ;;
+    esac
+
+    echo "   Sprawdzam klucz u Brevo..."
+    http=$(curl -s -o /tmp/brevo-check.json -w "%{http_code}" --max-time 20 \
+      -H "api-key: ${brevo}" https://api.brevo.com/v3/account || echo "000")
+    case "$http" in
+      200) ok "Klucz Brevo działa" ;;
+      401) fail "Brevo odrzucił klucz (HTTP 401: $(head -c 120 /tmp/brevo-check.json)).
+Sprawdź, czy skopiowałeś CAŁY klucz z zakładki API Keys." ;;
+      000) warn "Nie udało się połączyć z Brevo — sprawdzę przy wysyłce alertu." ;;
+      *) warn "Brevo odpowiedziało HTTP ${http} przy sprawdzaniu klucza." ;;
+    esac
+
+    from_check="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
+    if [[ -n "$from_check" && "$from_check" != *twojadomena* ]]; then
+      curl -s --max-time 20 -H "api-key: ${brevo}" "https://api.brevo.com/v3/senders" -o /tmp/brevo-senders.json || true
+      if python3 -c "
+import json,sys
+try:
+    d=json.load(open('/tmp/brevo-senders.json'))
+    aktyw=[s['email'].lower() for s in (d.get('senders') or []) if s.get('active')]
+    sys.exit(0 if '$from_check'.lower() in aktyw else 1)
+except Exception:
+    sys.exit(2)
+" 2>/dev/null; then
+        ok "Nadawca ${from_check} zweryfikowany w Brevo"
+      else
+        warn "Nadawca '${from_check}' NIE wygląda na zweryfikowanego.
+     Dodaj: https://app.brevo.com/senders -> Add a sender (potwierdź link z maila)."
+      fi
+    fi
+  fi
+fi
+
+# ── Adresy nadawcy i odbiorcy (wspólne dla obu dostawców) ───────────────────
+if [[ -f .email-config ]]; then
+  cfg_to="$(grep -E '^ALERT_EMAIL_TO=' .email-config | head -1 | cut -d= -f2- | tr -d ' \r')"
+  cfg_from="$(grep -E '^ALERT_EMAIL_FROM=' .email-config | head -1 | cut -d= -f2- | tr -d ' \r')"
+  if [[ -n "$cfg_to" ]]; then
+    python3 - "$cfg_to" "$cfg_from" <<'PYCFG'
 import pathlib, re, sys
 to, frm = sys.argv[1], sys.argv[2]
 p = pathlib.Path('wrangler.toml'); s = p.read_text()
@@ -184,24 +240,21 @@ if frm:
     s = re.sub(r'^ALERT_EMAIL_FROM = .*$', f'ALERT_EMAIL_FROM = "{frm}"', s, flags=re.M)
 p.write_text(s)
 PYCFG
-      ok "Adresy e-mail wpisane do wrangler.toml z .email-config"
-    fi
+    ok "Adresy wpisane do wrangler.toml z .email-config"
   fi
-
-  to="$(grep -E '^ALERT_EMAIL_TO' wrangler.toml | head -1 | cut -d'"' -f2)"
-  from="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
-  if [[ -z "$to" ]]; then
-    warn "Brak odbiorcy alertów. Podaj go w pliku .email-config (zalecane):
-       echo 'ALERT_EMAIL_TO=twoj@email.pl' > .email-config
-     albo wpisz ręcznie ALERT_EMAIL_TO w wrangler.toml. E-mail zostanie pominięty."
-  elif [[ -z "$from" || "$from" == *twojadomena* ]]; then
-    warn "ALERT_EMAIL_FROM to placeholder: '${from}'. Ustaw zweryfikowanego nadawcę
-     (Brevo: Senders -> Add a sender) w .email-config lub wrangler.toml."
-  else
-    ok "E-mail: z ${from} na ${to}"
-  fi
-  ok "Klucz Brevo wygląda poprawnie"
 fi
+
+to="$(grep -E '^ALERT_EMAIL_TO' wrangler.toml | head -1 | cut -d'"' -f2)"
+from="$(grep -E '^ALERT_EMAIL_FROM' wrangler.toml | head -1 | cut -d'"' -f2)"
+if [[ -z "$to" ]]; then
+  warn "Brak odbiorcy alertów. Ustaw ALERT_EMAIL_TO w .email-config:"
+  echo "       echo 'ALERT_EMAIL_TO=twoj@email.pl' >> .email-config"
+elif [[ -z "$from" || "$from" == *twojadomena* ]]; then
+  warn "ALERT_EMAIL_FROM to placeholder '${from}' — ustaw zweryfikowanego nadawcę w .email-config."
+else
+  ok "E-mail: z ${from} na ${to}"
+fi
+
 
 echo
 echo "${BOLD}=== 3. WDRAŻAM SEKRETY ===${RESET}"
