@@ -349,17 +349,19 @@ function renderCandidateTable(scan: ScanResult, view: ViewMeta): string {
   out.push('<div class="table-wrap">');
   out.push('<table class="grid" id="cand-table">');
   out.push('<thead><tr>');
+  // 9 kolumn zamiast 12 — tabela mieści się na ekranie laptopa bez przewijania
+  // w poziomie. Połączenia: IV front/back + IV rank w jedną kolumnę,
+  // term structure + implied vs historyczny w drugą. Kolumna "Wejście"
+  // zniknęła z tabeli, bo data wejścia jest w rozwijanym szczegółach wiersza —
+  // a była to najrzadziej potrzebna informacja przy przeglądaniu listy.
   out.push(th('Spółka', 'symbol', 'left'));
   out.push(th('Score', 'score', 'num'));
   out.push(th('Wyniki', 'date', 'left'));
   out.push(th('Spot', 'spot', 'num'));
   out.push(th('Nogi (front → back)', undefined, 'left'));
-  out.push(th('IV front / back', 'iv', 'num'));
-  out.push(th('Term structure', 'slope', 'num'));
-  out.push(th('Implied vs hist.', 'move', 'num'));
-  out.push(th('IV rank', 'ivrank', 'num'));
-  out.push(th('OI / spread ATM', 'oi', 'num'));
-  out.push(th('Wejście', 'entry', 'left'));
+  out.push(th('IV front/back · rank', 'iv', 'num'));
+  out.push(th('Nachylenie · implied/hist.', 'slope', 'num'));
+  out.push(th('OI · spread ATM', 'oi', 'num'));
   out.push(th('Flagi', undefined, 'left'));
   out.push('</tr></thead>');
 
@@ -368,7 +370,7 @@ function renderCandidateTable(scan: ScanResult, view: ViewMeta): string {
     const candidate = scan.candidates[i];
     if (!candidate) continue;
     out.push(renderCandidateRow(candidate, i, view));
-    out.push(renderCandidateDetail(candidate, i));
+    out.push(renderCandidateDetail(candidate, i, view));
   }
   out.push('</tbody>');
   out.push('</table>');
@@ -510,41 +512,45 @@ function renderCandidateRow(c: CalendarCandidate, index: number, view: ViewMeta)
   );
   out.push('</td>');
 
-  /* ── IV front / back ────────────────────────────────────────────────── */
-  out.push('<td class="num">');
+  /* ── IV front/back + IV rank (jedna kolumna) ────────────────────────── */
+  out.push('<td class="num c-iv">');
   out.push(
-    '<span class="mono">' +
+    '<div class="mono">' +
       esc(fmtPct(front?.atmIv)) +
-      '</span><span class="dim"> / </span><span class="mono">' +
+      '<span class="dim"> / </span>' +
       esc(fmtPct(back?.atmIv)) +
-      '</span>',
+      '</div>',
   );
-  if (c.termStructureRatio !== undefined && Number.isFinite(c.termStructureRatio)) {
-    out.push('<div class="sub dim mono">ratio ' + esc(c.termStructureRatio.toFixed(3)) + '</div>');
-  }
-  out.push('</td>');
-
-  /* ── Term structure ─────────────────────────────────────────────────── */
-  out.push('<td class="num">');
-  out.push('<span class="' + signClass(c.termStructureSlope) + ' mono">' + esc(fmtSignedPp(c.termStructureSlope)) + '</span>');
-  out.push('</td>');
-
-  /* ── Implied vs historyczny ruch ────────────────────────────────────── */
-  out.push('<td class="num">');
-  out.push('<span class="mono">' + esc(fmtPct(front?.impliedMovePct)) + '</span>');
-  out.push('<span class="dim"> vs </span>');
-  out.push('<span class="mono">' + esc(fmtPct(c.avgHistoricalMovePct)) + '</span>');
-  out.push('<div class="sub ' + moveRelationClass(c) + '">' + esc(moveRelationLabel(c)) + '</div>');
-  out.push('</td>');
-
-  /* ── IV rank ────────────────────────────────────────────────────────── */
-  out.push('<td class="num">');
   if (c.ivRank !== undefined && Number.isFinite(c.ivRank)) {
-    out.push('<span class="mono">' + esc(fmtInt(c.ivRank)) + '</span>');
-    out.push('<div class="bar-mini" title="IV rank ' + esc(fmtInt(c.ivRank)) + '/100"><span class="' + rankClass(c.ivRank) + '" style="width:' + esc(String(clampPct(c.ivRank))) + '%"></span></div>');
+    out.push(
+      '<div class="sub dim mono">IV rank ' +
+        esc(fmtInt(c.ivRank)) +
+        '</div><div class="bar-mini" title="IV rank ' +
+        esc(fmtInt(c.ivRank)) +
+        '/100"><span class="' +
+        rankClass(c.ivRank) +
+        '" style="width:' +
+        esc(String(clampPct(c.ivRank))) +
+        '%"></span></div>',
+    );
   } else {
-    out.push('<span class="dim">brak historii</span>');
+    out.push('<div class="sub dim">brak historii IV</div>');
   }
+  out.push('</td>');
+
+  /* ── Nachylenie + implied vs historyczny (jedna kolumna) ────────────── */
+  out.push('<td class="num c-slope">');
+  out.push(
+    '<div class="' + signClass(c.termStructureSlope) + ' mono">' + esc(fmtSignedPp(c.termStructureSlope)) + '</div>',
+  );
+  out.push(
+    '<div class="sub mono" title="implied move vs średni historyczny ruch po wynikach">' +
+      esc(fmtPct(front?.impliedMovePct)) +
+      '<span class="dim"> vs </span>' +
+      esc(fmtPct(c.avgHistoricalMovePct)) +
+      '</div>',
+  );
+  out.push('<div class="sub ' + moveRelationClass(c) + '">' + esc(moveRelationLabel(c)) + '</div>');
   out.push('</td>');
 
   /* ── Płynność ───────────────────────────────────────────────────────── */
@@ -557,26 +563,21 @@ function renderCandidateRow(c: CalendarCandidate, index: number, view: ViewMeta)
   out.push('<div class="sub mono' + spreadToneClass(worstSpread) + '">' + esc(fmtPct(worstSpread, 1)) + ' <span class="dim">spread</span></div>');
   out.push('</td>');
 
-  /* ── Sugerowane wejście ─────────────────────────────────────────────── */
-  out.push('<td class="c-entry">');
-  if (c.suggestedEntryDate) {
-    out.push('<div class="mono">' + esc(fmtDatePl(c.suggestedEntryDate)) + '</div>');
-    const delta = daysBetween(view.asOf, c.suggestedEntryDate);
-    if (delta !== undefined) {
-      out.push('<div class="sub dim mono">' + esc(describeEntryDelta(delta)) + '</div>');
-    }
-  } else {
-    out.push('<span class="dim">' + DASH + '</span>');
-  }
-  out.push('</td>');
+  // Sugerowana data wejścia jest w rozwijanym szczególe wiersza — patrz renderCandidateDetail.
 
   /* ── Flagi ──────────────────────────────────────────────────────────── */
   out.push('<td class="c-flags">');
   if (flags.length === 0) {
     out.push('<span class="dim">brak flag</span>');
   } else {
-    for (const flag of flags) {
+    // W tabeli pokazujemy maksymalnie 3 flagi — reszta jest w rozwijanym
+    // szczególe. Bez tego limitu kolumna rozciągała wiersz na całą szerokość
+    // i to ona głównie odpowiadała za to, że tabela nie mieściła się na ekranie.
+    for (const flag of flags.slice(0, 3)) {
       out.push(chip(flag, flagTone(flag)));
+    }
+    if (flags.length > 3) {
+      out.push('<span class="chip chip-more" title="' + esc(flags.slice(3).join(', ')) + '">+' + esc(String(flags.length - 3)) + '</span>');
     }
   }
   if (c.warnings.length > 0) {
@@ -596,11 +597,23 @@ function renderCandidateRow(c: CalendarCandidate, index: number, view: ViewMeta)
   return out.join('\n');
 }
 
-function renderCandidateDetail(c: CalendarCandidate, index: number): string {
+function renderCandidateDetail(c: CalendarCandidate, index: number, view: ViewMeta): string {
   const out: string[] = [];
   out.push('<tr class="detail" id="detail-' + esc(String(index)) + '" data-for="' + esc(String(index)) + '" hidden>');
   out.push('<td colspan="12">');
   out.push('<div class="detail-grid">');
+  // Sugerowana data wejścia trafiła tu z tabeli — przy przeglądaniu listy była
+  // rzadko potrzebna, a zabierała całą kolumnę szerokości.
+  if (c.suggestedEntryDate) {
+    const delta = daysBetween(view.asOf, c.suggestedEntryDate);
+    out.push(
+      '<div><span class="k">Sugerowane wejście:</span> <span class="mono">' +
+        esc(fmtDatePl(c.suggestedEntryDate)) +
+        '</span>' +
+        (delta !== undefined ? ' <span class="dim">(' + esc(describeEntryDelta(delta)) + ')</span>' : '') +
+        '</div>',
+    );
+  }
 
   /* ── kolumna 1: punktacja ───────────────────────────────────────────── */
   out.push('<div class="detail-col">');
@@ -1463,9 +1476,9 @@ input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px}
 .table-wrap{overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:10px;
   background:var(--panel-2);-webkit-overflow-scrolling:touch}
 .table-wrap.short{max-height:340px}
-table.grid{width:100%;min-width:1380px;border-collapse:separate;border-spacing:0;font-size:12.5px}
+table.grid{width:100%;min-width:1120px;border-collapse:separate;border-spacing:0;font-size:12.5px}
 table.grid.grid-watch{min-width:720px}
-table.grid th{position:sticky;top:0;z-index:3;background:var(--panel-3);color:var(--text-2);
+table.grid th{position:sticky;top:0;z-index:3;background:var(--panel-3);color:var(--text-2);padding:8px;
   text-align:left;font-weight:600;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
   padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 table.grid th.th-num{text-align:right}
@@ -1473,7 +1486,7 @@ table.grid th.sortable{cursor:pointer;user-select:none}
 table.grid th.sortable:hover{color:var(--text);background:#26303e}
 table.grid th.sorted{color:var(--text)}
 table.grid th .arrow{display:inline-block;width:10px;margin-left:5px;color:var(--accent);font-size:11px}
-table.grid td{padding:9px 10px;border-bottom:1px solid var(--line-2);vertical-align:top}
+table.grid td{padding:8px;border-bottom:1px solid var(--line-2);vertical-align:top}
 table.grid tbody tr.row{cursor:pointer}
 table.grid tbody tr.row:hover{background:#1a2130}
 table.grid tbody tr.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
@@ -1481,11 +1494,11 @@ table.grid tbody tr.row[aria-expanded=true]{background:#1a2130}
 table.grid tbody tr.row[aria-expanded=true] td{border-bottom-color:transparent}
 tr[hidden]{display:none!important}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
-.c-sym{min-width:150px}
+.c-sym{min-width:135px;max-width:170px}
 .sym{font-size:14.5px;font-weight:700;letter-spacing:.02em}
-.sym-name{font-size:11px;color:var(--text-2);max-width:190px}
+.sym-name{font-size:10.5px;color:var(--text-2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sym-sector{font-size:10px;color:var(--dim);margin-top:2px}
-.c-score{width:86px}
+.c-score{width:78px}
 .score{display:inline-flex;align-items:center;gap:8px;padding:3px 8px;border-radius:8px;
   border:1px solid var(--line);background:#1d2430;color:var(--text-2)}
 .score b{font-size:15px;line-height:1.15}
@@ -1502,14 +1515,19 @@ tr[hidden]{display:none!important}
 .tag-unknown{border-color:rgba(233,196,106,.35);color:var(--yellow)}
 .tag-ok{border-color:rgba(61,220,151,.35);color:var(--green)}
 .tag-warn{border-color:rgba(255,107,122,.4);color:var(--red)}
-.c-legs{min-width:250px}
-.leg{display:flex;gap:8px;align-items:baseline;font-size:11.5px}
-.leg-tag{display:inline-block;width:38px;color:var(--dim);font-size:9.5px;text-transform:uppercase;
+.c-legs{min-width:215px}
+.leg{display:flex;gap:6px;align-items:baseline;font-size:11px}
+.leg-tag{display:inline-block;width:34px;color:var(--dim);font-size:9px;text-transform:uppercase;
   letter-spacing:.05em}
 .leg-note{font-size:10.5px;color:var(--text-2);margin-top:3px}
-.c-entry{min-width:110px}
-.c-flags{min-width:190px;max-width:300px}
-.c-flags .chip{margin:0 4px 4px 0}
+.c-flags{min-width:150px;max-width:230px}
+.c-flags .chip{margin:0 3px 3px 0}
+.c-iv{min-width:104px}
+.c-slope{min-width:118px}
+.chip-more{background:#232b38!important;color:var(--text-2)!important;border-color:var(--line)!important}
+/* Na bardzo wąskich ekranach tabela przewija się poziomo — to zamierzone,
+   ale dajemy wyraźną wskazówkę, że jest więcej kolumn po prawej. */
+.table-wrap{position:relative}
 .wrap-cell{white-space:normal;min-width:280px;color:var(--text-2)}
 .warn-pill{display:inline-block;font-size:10px;font-family:var(--mono);padding:2px 6px;
   border-radius:999px;border:1px solid rgba(255,107,122,.45);color:var(--red);
@@ -1577,7 +1595,7 @@ table.mini td{padding:4px 0;border-bottom:1px solid var(--line-2)}
   .top-grid{flex-direction:column}
   .stamp{width:100%}
   .table-wrap{max-height:64vh}
-  table.grid{min-width:1180px}
+  table.grid{min-width:1000px}
 }
 @media (max-width:560px){
   .cards{grid-template-columns:1fr}
