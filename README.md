@@ -45,7 +45,88 @@ Dlatego skaner premiuje układy, w których **front wygasa 1–10 dni przed wyni
 
 ---
 
-## 2. Szybki start (15 minut)
+## 2. Gdzie to ma działać — GitHub vs Cloudflare
+
+Te dwie rzeczy są często mylone, więc rozdzielmy je jasno:
+
+| | Co tam mieszka | Czy musi działać 24/7 |
+|---|---|---|
+| **GitHub** | kod źródłowy, historia zmian, testy (CI) | nie — to tylko magazyn i sprawdzanie kodu |
+| **Cloudflare** | **działający skaner**, cron, baza stanu (KV), dashboard, alerty | tak — to on budzi się 2× dziennie |
+
+**Twój komputer nie jest potrzebny do niczego po wdrożeniu.** Skaner działa w Cloudflare,
+a nie u Ciebie. Lokalnie uruchamiasz tylko dwie rzeczy:
+
+- `npm test` — żeby sprawdzić kod przed wypchnięciem (albo zrobi to GitHub Actions za Ciebie),
+- `npm run scan:local` — jednorazowy test na prawdziwych danych, **przed** wdrożeniem.
+
+### Wariant A — wszystko jednym skryptem (zalecany)
+
+Po sklonowaniu repo i wypełnieniu `.dev.vars`:
+
+```bash
+./setup-cloudflare.sh
+```
+
+Skrypt sam: zaloguje Cię do Cloudflare, utworzy namespace KV, wpisze jego ID do
+`wrangler.toml`, wgra sekrety z `.dev.vars` i zrobi deploy. Można go uruchamiać
+wielokrotnie — jest idempotentny. Na końcu wypisze adres Twojego Workera.
+
+### Wariant B — bez terminala, przez panel Cloudflare (Git integration)
+
+Jeśli wolisz klikać zamiast wpisywać komendy:
+
+1. Wypchnij kod do repozytorium na GitHubie (instrukcja niżej).
+2. Wejdź na **dash.cloudflare.com** → **Workers & Pages** → **Create** → **Connect to Git**.
+3. Wskaż swoje repozytorium i gałąź `main`.
+4. Cloudflare sam wykryje `wrangler.toml` — nie zmieniaj ustawień builda.
+5. **KV:** zakładka **Storage & Databases → KV → Create namespace** o nazwie `STATE`.
+   Potem w ustawieniach Workera dodaj binding: zmienna `STATE` → ten namespace.
+6. **Sekrety:** zakładka **Settings → Variables and Secrets** i dodaj po jednym:
+   `FINNHUB_API_KEY`, `TRADIER_API_KEY`, `API_KEY` (+ opcjonalnie Telegram/Resend).
+   Typ: **Secret**.
+7. **Deploy.** Od tej pory każdy `git push` na `main` wdraża nową wersję automatycznie.
+
+> **Uwaga o sekretach w obu wariantach:** sekrety trzymaj w JEDNYM miejscu — albo
+> w Cloudflare, albo w `.dev.vars` lokalnie. Nie commituj ich nigdy do GitHuba
+> (`.gitignore` już to blokuje, a CI dodatkowo sprawdza, czy taki plik nie trafił do repo).
+
+### Wypchnięcie kodu na GitHub (potrzebne w obu wariantach)
+
+Repozytorium git jest już zainicjowane i ma pierwszy commit — brakuje tylko zdalnego adresu:
+
+```bash
+# 1. Utwórz PUSTE repozytorium na github.com (bez README i .gitignore)
+# 2. Podmień adres poniżej i wypchnij:
+git remote add origin https://github.com/TWOJ_LOGIN/earnings-iv-scanner.git
+git push -u origin main
+```
+
+Po wypchnięciu w zakładce **Actions** na GitHubie zobaczysz, że testy przechodzą
+(workflow `.github/workflows/ci.yml` uruchamia `npm test`, typecheck i dry-run build).
+To jest Twoja siatka bezpieczeństwa: jeśli coś zepsujesz w kodzie, CI to pokaże,
+zanim Cloudflare wdroży zepsutą wersję.
+
+### Czego potrzebuję od Ciebie, żeby to dokończyć
+
+Nie mam dostępu do Twoich kont, więc te cztery rzeczy musisz zrobić sam (zajmuje ~15 minut):
+
+| # | Czego potrzebuję | Gdzie | Wymagane? |
+|---|---|---|---|
+| 1 | Adres repozytorium GitHub | github.com (utwórz puste repo) | tak |
+| 2 | Konto Cloudflare | dash.cloudflare.com (darmowe) | tak |
+| 3 | Klucz Finnhub | finnhub.io/register | tak |
+| 4 | Klucz Tradier | developer.tradier.com | tak |
+| 5 | Bot Telegram (`@BotFather`) + chat ID | Telegram | opcjonalnie |
+| 6 | Klucz Resend + własna domena | resend.com | opcjonalnie |
+
+**Nie potrzebuję niczego więcej** — żadnych haseł ani tokenów dostępowych. Jeśli chcesz,
+mogę za Ciebie przygotować commity, poprawki kodu i konfigurację; Ty wykonujesz tylko
+kroki wymagające logowania do swoich kont.
+
+---
+
+## 3. Szybki start (15 minut)
 
 ### Krok 1 — klucze API (oba darmowe)
 
@@ -73,11 +154,25 @@ npm install
 
 ### Krok 3 — test lokalny BEZ chmury (zalecane)
 
-Utwórz plik `.dev.vars` (jest w `.gitignore`, więc nie trafi do repo):
+Utwórz plik `.dev.vars` (jest w `.gitignore`, więc nie trafi do repo — użyje go
+zarówno test lokalny, jak i `setup-cloudflare.sh` przy wgrywaniu sekretów):
 
 ```ini
+# Wymagane
 FINNHUB_API_KEY=twoj_klucz_finnhub
 TRADIER_API_KEY=twoj_klucz_tradier
+API_KEY=dowolny_dlugi_losowy_ciag
+
+# Opcjonalne — tylko dla kanałów, które chcesz mieć
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_CHAT_ID=-1001234567890
+RESEND_API_KEY=re_xxxxxxxx
+```
+
+Losowy `API_KEY` wygenerujesz tak (chroni on endpointy `/api/*` przed obcymi):
+
+```bash
+head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 40
 ```
 
 Uruchom skan na żywo:
@@ -94,29 +189,22 @@ Jeśli widzisz tabelę z ocenami i nogami kalendarza — klucze działają i log
 
 ### Krok 4 — deploy na Cloudflare
 
+Najprościej: jeden skrypt, który robi wszystko (logowanie, KV, sekrety, deploy):
+
+```bash
+./setup-cloudflare.sh
+```
+
+Wariant ręczny, jeśli wolisz mieć kontrolę nad każdym krokiem:
+
 ```bash
 npx wrangler login
-npx wrangler kv namespace create STATE
-```
-
-Wklej `id` z outputu do `wrangler.toml` (odkomentuj sekcję `[[kv_namespaces]]`).
-
-Sekrety:
-
-```bash
-npx wrangler secret put FINNHUB_API_KEY
-npx wrangler secret put TRADIER_API_KEY
-npx wrangler secret put API_KEY              # dowolny długi losowy ciąg — chroni /api/*
-npx wrangler secret put TELEGRAM_BOT_TOKEN   # opcjonalnie
-npx wrangler secret put TELEGRAM_CHAT_ID     # opcjonalnie
-npx wrangler secret put RESEND_API_KEY       # opcjonalnie
-```
-
-Deploy:
-
-```bash
+npx wrangler kv namespace create STATE     # wklej id do wrangler.toml
+npx wrangler secret bulk .dev.vars         # wgrywa wszystkie sekrety z pliku
 npx wrangler deploy
 ```
+
+Pełny opis — w tym wariant bez terminala, przez panel Cloudflare — jest w sekcji 2 wyżej.
 
 Adresy po wdrożeniu:
 
@@ -144,7 +232,7 @@ zamknąć — w panelu Cloudflare: **Zero Trust → Access → Applications** i 
 
 ---
 
-## 3. Jak czytać wynik
+## 4. Jak czytać wynik
 
 Każdy kandydat ma ocenę 0–100 rozbitą na pięć składowych. Rozwinięcie wiersza w dashboardzie
 pokazuje pełne uzasadnienie każdej z nich.
@@ -201,7 +289,7 @@ Jeśli w układzie występuje **którykolwiek** z problemów krytycznych, ocena 
 
 ---
 
-## 4. Konfiguracja
+## 5. Konfiguracja
 
 Wszystko w `[vars]` w `wrangler.toml`. Zmiana wymaga `npx wrangler deploy`.
 
@@ -233,7 +321,7 @@ Cron chodzi 2× dziennie, więc bez tego dostałbyś ten sam komunikat kilkadzie
 
 ---
 
-## 5. Koszty i limity
+## 6. Koszty i limity
 
 | Zasób | Limit darmowy | Zużycie skanera |
 |---|---|---|
@@ -249,7 +337,7 @@ wykonania** — przy `MAX_DEEP_ANALYSIS` powyżej ~60 spółek rozważ podział 
 
 ---
 
-## 6. Struktura projektu
+## 7. Struktura projektu
 
 ```
 src/
@@ -282,7 +370,7 @@ test/                       testy (72 przypadki)
 
 ---
 
-## 7. Testy
+## 8. Testy
 
 ```bash
 npm test           # 72 testy: matematyka, kalendarz, scoring, wybór nóg, parsowanie API,
@@ -337,7 +425,7 @@ Każdy z tych błędów dawał wyniki, które *wyglądały* poprawnie.
 
 ---
 
-## 8. Rozwiązywanie problemów
+## 9. Rozwiązywanie problemów
 
 | Objaw | Przyczyna i co zrobić |
 |---|---|
@@ -358,7 +446,7 @@ npx wrangler tail --format pretty
 
 ---
 
-## 9. Możliwe rozszerzenia
+## 10. Możliwe rozszerzenia
 
 - **Płatny dostawca opcji** (Polygon, ORATS, Tradier brokerski) — daje realne greki i IV
   śróddzienną. Adaptery są odizolowane w `src/adapters/`, więc podmiana to jedna klasa.
