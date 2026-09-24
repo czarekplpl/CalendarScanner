@@ -9,6 +9,8 @@ dist/
 .dev.vars.*
 .env
 .env.*
+.cloudflare.env
+.github-token
 !.env.example
 
 # Wyniki lokalnych skanów
