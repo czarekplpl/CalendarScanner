@@ -20,12 +20,27 @@ crons = ["10 11 * * 1-5", "10 21 * * 1-5"]
 [vars]
 # ── Dostawcy danych ──────────────────────────────────────────────────────────
 # finnhub = kalendarz wyników (darmowy klucz)
-# tradier  = łańcuchy opcji (darmowy sandbox; dane 15 min opóźnione)
 EARNINGS_PROVIDER = "finnhub"
+
+# ── Wybór dostawcy danych opcyjnych ──────────────────────────────────────────
+# "tastytrade" — ZALECANY, jeśli masz tam konto. Daje IV rank, percentyl IV i IV
+#                per wygaśnięcie WPROST z API, więc skaner działa w pełni od
+#                pierwszego uruchomienia (bez zbierania historii przez 60 dni).
+#                Wymaga 4 poświadczeń OAuth2. Zobacz sekcję 3 README.
+# "tradier"    — prostszy (jeden klucz API, rejestracja bez formalności),
+#                ale NIE zwraca greków ani IV w sandboxie — liczymy sami,
+#                a IV rank wymaga ~60 dni własnej historii.
 OPTIONS_PROVIDER = "tradier"
 
 # "sandbox" (darmowy, opóźniony) albo "production" (konto w Tradier, real-time + greki)
 TRADIER_ENV = "sandbox"
+
+# ── Konto brokerskie tastytrade (tylko gdy OPTIONS_PROVIDER = "tastytrade") ──
+# WAŻNE: sandbox i produkcja mają OSOBNE poświadczenia — nie działają zamiennie.
+# Poświadczenia zdobywasz na my.tastytrade.com -> Manage -> My Profile -> API
+# -> OAuth Applications (+ New OAuth client, potem Create Grant => refresh token).
+# Zakresy read/trade wymagają włączonego 2FA na koncie.
+TASTYTRADE_ENV = "sandbox"
 
 # ── Progi skanowania ─────────────────────────────────────────────────────────
 # Okno alertu: skanuj wyników, które wypadają między MIN a MAX dni od dziś.
@@ -50,7 +65,14 @@ INCLUDE_ETFS = "false"
 # Włącz kanały po ustawieniu sekretów. "dashboard" zawsze działa.
 ALERT_CHANNELS = "dashboard,telegram,email"
 
-# ── E-mail (Resend) ──────────────────────────────────────────────────────────
+# ── E-mail ───────────────────────────────────────────────────────────────────
+# Dostawca wysyłki: "brevo" (domyślnie) albo "resend".
+# Brevo wymaga sekretu BREVO_API_KEY = klucz API v3 (zakładka "API Keys", prefiks xkeysib-).
+# UWAGA: klucz SMTP z Brevo (prefiks xsmtpsib-) NIE działa z API v3 — zwraca 401.
+EMAIL_PROVIDER = "brevo"
+
+# Odbiorca alertów; nadawca musi być zweryfikowany u dostawcy (Brevo: nadawcy z listy
+# "Senders", Resend: własna domena). Dozwolony format z nazwą: "Skaner <adres@domena>".
 ALERT_EMAIL_TO = ""
 ALERT_EMAIL_FROM = "scanner@twojadomena.pl"
 

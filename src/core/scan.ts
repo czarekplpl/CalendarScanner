@@ -18,13 +18,14 @@
 
 import { FinnhubAdapter, approxMoveFromSurprises } from '../adapters/finnhub.ts';
 import { TradierAdapter, selectCalendarLegs } from '../adapters/tradier.ts';
+import { TastytradeAdapter, type TastytradeMetrics } from '../adapters/tastytrade.ts';
 import { KvCache, mapLimit } from './http.ts';
 import { addDays, daysBetween, todayInNewYork, tradingDaysBetween } from './market.ts';
 import { scoreCandidate } from './scoring.ts';
 import { computeIvRank, loadIvHistory, recordIvObservation } from './history.ts';
 import { UNIVERSE_SNAPSHOT } from '../data/universe-snapshot.ts';
 import { ETF_UNIVERSE } from '../data/etf-universe.ts';
-import type { CalendarCandidate, EarningsEvent, Env, ScanResult } from '../types.ts';
+import type { CalendarCandidate, EarningsEvent, Env, IvPoint, ScanResult } from '../types.ts';
 
 export const SCANNER_VERSION = '1.0.0';
 
@@ -46,8 +47,79 @@ export function readScanConfig(env: Env) {
     cacheTtlSeconds: num(env, 'CACHE_TTL_SECONDS', 3600),
     includeEtfs: (env.INCLUDE_ETFS ?? 'false') === 'true',
     tradierEnv: (env.TRADIER_ENV === 'production' ? 'production' : 'sandbox') as 'sandbox' | 'production',
+    tastytradeEnv: (env.TASTYTRADE_ENV === 'production' ? 'production' : 'sandbox') as 'sandbox' | 'production',
     earningsProvider: env.EARNINGS_PROVIDER ?? 'finnhub',
     optionsProvider: env.OPTIONS_PROVIDER ?? 'tradier',
+  };
+}
+
+/**
+ * Wspólny interfejs dostawcy danych opcyjnych.
+ *
+ * Dzięki temu skaner nie wie, czy pracuje na Tradierze, czy na tastytrade.
+ * Oba adaptery mają identyczne metody, więc podmiana to jedna zmienna
+ * środowiskowa (OPTIONS_PROVIDER), a nie zmiana logiki.
+ */
+export interface OptionsProvider {
+  quote(symbol: string): Promise<number | undefined>;
+  expirations(symbol: string): Promise<string[]>;
+  buildIvPoint(params: {
+    symbol: string;
+    spot: number;
+    expiration: string;
+    today: string;
+    earningsDate: string;
+    metrics?: TastytradeMetrics;
+  }): Promise<IvPoint | undefined>;
+  /** Metryki zmienności — dostępne tylko u części dostawców (tastytrade). */
+  marketMetrics?(symbol: string): Promise<TastytradeMetrics>;
+}
+
+/**
+ * Tworzy adapter opcji na podstawie konfiguracji.
+ * Zwraca undefined, gdy brakuje poświadczeń — wołający raportuje to jako błąd,
+ * zamiast wywalać cały skan.
+ */
+export function createOptionsProvider(
+  env: Env,
+  cfg: ReturnType<typeof readScanConfig>,
+): { provider?: OptionsProvider; error?: string } {
+  if (cfg.optionsProvider === 'tastytrade') {
+    const clientSecret = env.TASTYTRADE_CLIENT_SECRET;
+    const refreshToken = env.TASTYTRADE_REFRESH_TOKEN;
+    if (!clientSecret || !refreshToken) {
+      return {
+        error:
+          'Brak TASTYTRADE_CLIENT_SECRET lub TASTYTRADE_REFRESH_TOKEN — nie mogę pobrać danych opcyjnych. ' +
+          'Poświadczenia wygenerujesz na my.tastytrade.com -> Manage -> My Profile -> API -> OAuth Applications ' +
+          '(Client Secret + Create Grant => refresh token). Ustaw je przez: npx wrangler secret bulk .dev.vars',
+      };
+    }
+    return {
+      provider: new TastytradeAdapter(
+        {
+          clientId: env.TASTYTRADE_CLIENT_ID,
+          clientSecret,
+          refreshToken,
+          environment: cfg.tastytradeEnv,
+        },
+        env,
+      ),
+    };
+  }
+
+  if (!env.TRADIER_API_KEY) {
+    return {
+      error:
+        'Brak TRADIER_API_KEY — pomijam analizę opcji. Ustaw sekret: npx wrangler secret put TRADIER_API_KEY ' +
+        'albo przełącz się na tastytrade: OPTIONS_PROVIDER = "tastytrade" w wrangler.toml',
+    };
+  }
+  return {
+    provider: new TradierAdapter(env.TRADIER_API_KEY, {
+      environment: cfg.tradierEnv,
+      riskFreeRate: RISK_FREE_RATE,
+    }),
   };
 }
 
@@ -56,7 +128,7 @@ export interface ScanDeps {
   asOf?: string;
   /** Wstrzyknięcie adapterów (testy / inni dostawcy) */
   earningsAdapter?: { listEarnings(from: string, to: string): Promise<EarningsEvent[]> };
-  optionsAdapter?: Pick<TradierAdapter, 'quote' | 'expirations' | 'buildIvPoint'>;
+  optionsAdapter?: OptionsProvider;
   universe?: UniverseRow[];
 }
 
@@ -190,26 +262,23 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
   }
 
   // ── 5. Adapter opcji ───────────────────────────────────────────────────────
-  let optionsAdapter: Pick<TradierAdapter, 'quote' | 'expirations' | 'buildIvPoint'> | undefined =
-    deps.optionsAdapter;
+  let optionsAdapter: OptionsProvider | undefined = deps.optionsAdapter;
   if (!optionsAdapter) {
-    if (!env.TRADIER_API_KEY) {
-      errors.push('Brak TRADIER_API_KEY — pomijam analizę opcji. Ustaw sekret: npx wrangler secret put TRADIER_API_KEY');
+    const created = createOptionsProvider(env, cfg);
+    if (!created.provider) {
+      errors.push(created.error ?? 'Nie udało się utworzyć dostawcy danych opcyjnych');
       for (const item of toAnalyze) {
         result.watchlistOnly.push({
           symbol: item.symbol,
           earningsDate: item.event.date,
           daysToEarnings: item.daysToEarnings,
-          reason: 'brak klucza TRADIER_API_KEY — analiza opcji niemożliwa',
+          reason: 'brak działającego dostawcy opcji — analiza niemożliwa',
         });
       }
       result.durationMs = Date.now() - started;
       return result;
     }
-    optionsAdapter = new TradierAdapter(env.TRADIER_API_KEY, {
-      environment: cfg.tradierEnv,
-      riskFreeRate: RISK_FREE_RATE,
-    });
+    optionsAdapter = created.provider;
   }
 
   const historyAdapter = env.FINNHUB_API_KEY ? new FinnhubAdapter(env.FINNHUB_API_KEY) : undefined;
@@ -221,7 +290,7 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
     return analyzeSymbol({
       item,
       universeEntry: universeBySymbol.get(item.symbol),
-      optionsAdapter: optionsAdapter as Pick<TradierAdapter, 'quote' | 'expirations' | 'buildIvPoint'>,
+      optionsAdapter,
       historyAdapter,
       minOpenInterest: cfg.minOpenInterest,
       asOf,
@@ -257,7 +326,7 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
 interface AnalyzeArgs {
   item: { symbol: string; event: EarningsEvent; daysToEarnings: number };
   universeEntry?: UniverseRow;
-  optionsAdapter: Pick<TradierAdapter, 'quote' | 'expirations' | 'buildIvPoint'>;
+  optionsAdapter: OptionsProvider;
   historyAdapter?: FinnhubAdapter;
   minOpenInterest: number;
   asOf: string;
@@ -284,6 +353,18 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
 
   // Próbujemy kolejne układy nóg — pierwszy może mieć zerowy OI na ATM
   // (np. w sandboxie brak notowań dla części terminów).
+  // Metryki zmienności od dostawcy (jeśli je ma). Dla tastytrade zawierają
+  // IV rank, percentyl i IV per wygaśnięcie — czyli term structure bez liczenia
+  // z cen. Pobieramy RAZ na spółkę, nie per noga.
+  let metrics: TastytradeMetrics | undefined;
+  if (optionsAdapter.marketMetrics) {
+    try {
+      metrics = await optionsAdapter.marketMetrics(symbol);
+    } catch {
+      metrics = undefined; // metryki są opcjonalne — analiza toczy się dalej
+    }
+  }
+
   for (const legs of legCandidates) {
     const [front, back] = await Promise.all([
       optionsAdapter.buildIvPoint({
@@ -292,6 +373,7 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
         expiration: legs.front,
         today: asOf,
         earningsDate: item.event.date,
+        metrics,
       }),
       optionsAdapter.buildIvPoint({
         symbol,
@@ -299,6 +381,7 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
         expiration: legs.back,
         today: asOf,
         earningsDate: item.event.date,
+        metrics,
       }),
     ]);
 
@@ -306,11 +389,15 @@ async function analyzeSymbol(args: AnalyzeArgs): Promise<CalendarCandidate | und
     if (!Number.isFinite(front.atmIv) || !Number.isFinite(back.atmIv)) continue;
     if (front.atmIv <= 0 || back.atmIv <= 0) continue;
 
-    // Historia IV: zapisz obserwację i policz rank (tylko gdy mamy KV).
-    let ivRank: number | undefined;
+    // IV rank — kolejność źródeł:
+    //  1. wartość od dostawcy (tastytrade podaje gotowy IV rank) — działa od razu,
+    //  2. własna historia z KV — potrzebuje ~60 dni obserwacji.
+    // Zapisujemy obserwację ZAWSZE, gdy mamy KV: nawet jeśli dostawca daje rank,
+    // własna historia pozwoli później porównać oba źródła i nie zależeć od dostawcy.
+    let ivRank: number | undefined = metrics?.ivRank;
     if (env.STATE) {
       const recorded = await recordIvObservation(env, symbol, asOf, front.atmIv);
-      ivRank = recorded.ivRank;
+      if (ivRank === undefined) ivRank = recorded.ivRank;
     }
 
     // Typowy ruch historyczny — best-effort, nie blokuje analizy.

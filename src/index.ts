@@ -171,8 +171,32 @@ function healthReport(env: Env): Record<string, unknown> {
   if (channels.includes('telegram') && (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)) {
     missing.push('TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID');
   }
-  if (channels.includes('email') && (!env.RESEND_API_KEY || !env.ALERT_EMAIL_TO || !env.ALERT_EMAIL_FROM)) {
-    missing.push('RESEND_API_KEY + ALERT_EMAIL_TO + ALERT_EMAIL_FROM');
+  if (channels.includes('email')) {
+    // Kolejność musi odpowiadać wyborowi w `alerts/index.ts`: EMAIL_PROVIDER decyduje
+    // o dostawcy, a przy dostawcy domyślnym (brak zmiennej) dopuszczamy zejście na
+    // drugiego, jeśli tylko on ma klucz. Inaczej /api/health pokazuje „brakuje
+    // RESEND_API_KEY” w konfiguracji, która wysyła przez Brevo (i odwrotnie).
+    const provider = (env.EMAIL_PROVIDER ?? '').trim().toLowerCase();
+    const hasEmailKey =
+      provider === 'resend'
+        ? Boolean(env.RESEND_API_KEY)
+        : provider === 'brevo'
+          ? Boolean(env.BREVO_API_KEY)
+          : Boolean(env.BREVO_API_KEY || env.RESEND_API_KEY);
+    if (!hasEmailKey) {
+      // Przy Brevo nazywamy klucz po imieniu: najczęstsza pomyłka to wklejenie
+      // klucza SMTP (xsmtpsib-), który z API v3 nie działa.
+      missing.push(
+        provider === 'resend'
+          ? 'RESEND_API_KEY'
+          : provider === 'brevo'
+            ? 'BREVO_API_KEY (klucz API v3, nie SMTP)'
+            : 'BREVO_API_KEY (klucz API v3, nie SMTP) albo RESEND_API_KEY',
+      );
+    }
+    if (!env.ALERT_EMAIL_TO || !env.ALERT_EMAIL_FROM) {
+      missing.push('ALERT_EMAIL_TO + ALERT_EMAIL_FROM');
+    }
   }
 
   return {

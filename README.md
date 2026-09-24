@@ -107,6 +107,66 @@ Po wypchnięciu w zakładce **Actions** na GitHubie zobaczysz, że testy przecho
 To jest Twoja siatka bezpieczeństwa: jeśli coś zepsujesz w kodzie, CI to pokaże,
 zanim Cloudflare wdroży zepsutą wersję.
 
+### Którego dostawcy opcji użyć — Tradier czy tastytrade?
+
+| | Tradier (sandbox) | tastytrade |
+|---|---|---|
+| Rejestracja | e-mail + hasło, **jeden klucz API** | konto brokerskie + aplikacja OAuth + 2FA |
+| Poświadczenia | 1 sekret | 4 (client ID, client secret, refresh token, środowisko) |
+| Greki i IV | **nie** — liczymy sami z cen | **tak** |
+| IV rank | własna historia, sensowna po ~60 dniach | **wprost z API, od pierwszego dnia** |
+| IV per wygaśnięcie | liczymy z cen | **wprost z API** |
+| Płynność | open interest ATM | rating płynności (OI niedostępny) |
+| Opóźnienie danych | 15 min (sandbox) | zależne od konta |
+
+**Rekomendacja:** jeśli masz konto w tastytrade — użyj tastytrade (`OPTIONS_PROVIDER = "tastytrade"`).
+Skaner jest wtedy w pełni funkcjonalny od pierwszego uruchomienia, bo IV rank i term structure
+przychodzą z API. Tradier zostaje jako opcja „chcę zacząć w 5 minut, jednym kluczem".
+
+### Poświadczenia tastytrade — krok po kroku
+
+1. Zaloguj się na **my.tastytrade.com**.
+2. **Manage → My Profile → API → OAuth Applications → + New OAuth client**.
+   - Redirect URI: dowolny pełny adres, np. `https://localhost/callback` (nie jest używany
+     przy pracy na własnym koncie, ale jest wymagany).
+   - Scopes: **`read`** (skaner tylko czyta dane; `trade` nie jest potrzebny).
+3. Skopiuj **Client ID** i **Client Secret**. ⚠️ Secret jest pokazywany **tylko raz** —
+   zapisz go od razu. Jeśli zgubisz, użyj **Regenerate**.
+4. Przy aplikacji kliknij **Manage → Create Grant** → skopiuj **refresh token**
+   (nie wygasa).
+5. Uwaga: zakresy `read`/`trade` wymagają włączonego **2FA** na koncie
+   (My Profile → Security).
+6. Sandbox i produkcja mają **osobne** poświadczenia — nie zadziałają zamiennie.
+   Jeśli dostaniesz błąd `401`, sprawdź, czy klucze i `TASTYTRADE_ENV` dotyczą
+   tego samego środowiska.
+
+Do `.dev.vars`:
+
+```ini
+TASTYTRADE_CLIENT_ID=twoj_client_id
+TASTYTRADE_CLIENT_SECRET=twoj_client_secret
+TASTYTRADE_REFRESH_TOKEN=twoj_refresh_token
+```
+
+I w `wrangler.toml` ustaw `OPTIONS_PROVIDER = "tastytrade"` oraz `TASTYTRADE_ENV`
+(`"sandbox"` albo `"production"`).
+
+### Klucz Brevo — musi być klucz API, nie SMTP
+
+Brevo ma **dwa różne** klucze i łatwo je pomylić:
+
+| Klucz | Prefiks | Do czego | Działa z Workera? |
+|---|---|---|---|
+| SMTP | `xsmtpsib-...` | klient pocztowy, port 587 | **nie** |
+| **API v3** | `xkeysib-...` | REST `api.brevo.com/v3/smtp/email` | **tak — ten jest potrzebny** |
+
+Klucz API v3 wygenerujesz na [app.brevo.com/settings/keys/api](https://app.brevo.com/settings/keys/api)
+(zakładka **API Keys**, nie SMTP). Skaner wykrywa klucz SMTP i zgłasza to czytelnym
+błędem, zamiast kończyć się tajemniczym `401`.
+
+Nadawca (`ALERT_EMAIL_FROM`) musi być **zweryfikowany** u dostawcy
+(Brevo: Senders → Add a sender). Format `"Skaner <adres@domena>"` jest obsługiwany.
+
 ### Czego potrzebuję od Ciebie, żeby to dokończyć
 
 Nie mam dostępu do Twoich kont, więc te cztery rzeczy musisz zrobić sam (zajmuje ~15 minut):
@@ -359,10 +419,12 @@ src/
     universe-snapshot.ts    200 spółek (snapshot wrzesień 2026)
     etf-universe.ts         38 płynnych ETF-ów
 scripts/scan-local.ts       lokalny skan bez Cloudflare
-test/                       testy (72 przypadki)
+test/                       testy (109 przypadków)
   blackscholes.test.ts      matematyka: BS, parytet, solver IV, kalendarz sesji
   scoring.test.ts           progi oceny i wybór nóg kalendarza
   adapters.test.ts          parsowanie odpowiedzi Finnhub/Tradier
+  tastytrade.test.ts        OAuth, cache tokenu, metryki IV, wybór źródła IV
+  brevo.test.ts             wysyłka e-mail, walidacja nadawcy, wykrycie klucza SMTP
   alerts.test.ts            wysyłka, deduplikacja, zachowanie przy awariach
   pipeline.test.ts          END-TO-END: prawdziwy handler crona na zamockowanej sieci
   fixtures/                 przykładowy wynik skanu (kontrakt dla dashboardu)
@@ -373,8 +435,8 @@ test/                       testy (72 przypadki)
 ## 8. Testy
 
 ```bash
-npm test           # 72 testy: matematyka, kalendarz, scoring, wybór nóg, parsowanie API,
-                   #          wysyłka alertów i pełny przepływ end-to-end
+npm test           # 109 testów: matematyka, kalendarz, scoring, wybór nóg, parsowanie API,
+                   #           wysyłka alertów, adaptery (tradier/tastytrade/brevo) i pełny przepływ end-to-end
 npm run typecheck  # TypeScript strict — przechodzi bez błędów
 npx wrangler deploy --dry-run   # sprawdza, że bundel się buduje, bez wdrażania
 ```

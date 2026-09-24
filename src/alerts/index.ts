@@ -1,5 +1,5 @@
 /**
- * ALERTY: Telegram + e-mail (Resend) + rejestr deduplikacji.
+ * ALERTY: Telegram + e-mail (Brevo API v3, alternatywnie Resend) + rejestr deduplikacji.
  *
  * Zasada: JEDEN alert na spółkę i cykl wyników na dany próg. Progi:
  *   T30     — spółka weszła w okno ~30 dni przed wynikami (pierwsze powiadomienie)
@@ -10,6 +10,7 @@
  * się poprawia, dostajesz eskalację.
  */
 
+import { parseEmailAddress, sendBrevoEmail } from '../adapters/brevo.ts';
 import {
   alertKey,
   alertTier,
@@ -18,6 +19,12 @@ import {
   markAlertedBatch,
 } from '../core/history.ts';
 import type { AlertRecord, CalendarCandidate, Env, ScanResult } from '../types.ts';
+
+/** Dostawca e-maila wybierany zmienną EMAIL_PROVIDER. */
+type EmailProvider = 'brevo' | 'resend';
+
+/** Domyślny dostawca e-maila, gdy EMAIL_PROVIDER nie jest ustawione. */
+const DEFAULT_EMAIL_PROVIDER: EmailProvider = 'brevo';
 
 export interface AlertDispatchResult {
   sent: number;
@@ -154,11 +161,17 @@ async function sendTelegram(env: Env, text: string): Promise<void> {
   }
 }
 
-async function sendEmail(env: Env, subject: string, html: string): Promise<void> {
+/** Wysyłka przez Resend — zostaje jako alternatywa dla Brevo (EMAIL_PROVIDER=resend). */
+async function sendViaResend(env: Env, subject: string, html: string): Promise<void> {
   const key = env.RESEND_API_KEY;
   const to = env.ALERT_EMAIL_TO;
   const from = env.ALERT_EMAIL_FROM;
-  if (!key) throw new Error('E-mail: brak RESEND_API_KEY');
+  if (!key) {
+    throw new Error(
+      'E-mail (Resend): brak RESEND_API_KEY. Ustaw sekret: npx wrangler secret put RESEND_API_KEY ' +
+        '(klucz z https://resend.com/api-keys).',
+    );
+  }
   if (!to || !from) throw new Error('E-mail: brak ALERT_EMAIL_TO lub ALERT_EMAIL_FROM');
 
   const res = await fetch('https://api.resend.com/emails', {
@@ -170,6 +183,74 @@ async function sendEmail(env: Env, subject: string, html: string): Promise<void>
     const body = await res.text().catch(() => '');
     throw new Error(`Resend HTTP ${res.status}: ${body.slice(0, 200)}`);
   }
+}
+
+/**
+ * Wysyłka przez Brevo API v3. Cała obsługa błędów (kod HTTP, kod błędu Brevo,
+ * rozpoznanie klucza SMTP) siedzi w adapterze `adapters/brevo.ts`.
+ *
+ * Uwaga: Brevo wymaga OSOBNYCH pól `name` i `email`, więc nadawcę w formacie
+ * "Nazwa <adres@domena>" trzeba rozdzielić — robi to `parseEmailAddress`.
+ * Zły format zgłaszamy od razu i wprost, bo wysłanie takiego stringa jako
+ * `sender.email` wróciłoby z API jako HTTP 400 bez wskazania przyczyny.
+ */
+async function sendViaBrevo(env: Env, subject: string, html: string): Promise<void> {
+  const key = env.BREVO_API_KEY;
+  const to = env.ALERT_EMAIL_TO;
+  const from = env.ALERT_EMAIL_FROM;
+  if (!key) {
+    throw new Error(
+      'E-mail (Brevo): brak BREVO_API_KEY. Ustaw sekret: npx wrangler secret put BREVO_API_KEY ' +
+        '— potrzebny jest klucz API v3 z https://app.brevo.com/settings/keys/api (zakładka "API Keys"), ' +
+        'a NIE klucz SMTP z zakładki "SMTP".',
+    );
+  }
+  if (!to) throw new Error('E-mail: brak ALERT_EMAIL_TO');
+  if (!from) throw new Error('E-mail: brak ALERT_EMAIL_FROM');
+
+  await sendBrevoEmail({
+    apiKey: key,
+    from: parseEmailAddress(from),
+    to: parseEmailAddress(to),
+    subject,
+    html,
+  });
+}
+
+/**
+ * Wybiera dostawcę i wysyła e-mail.
+ *
+ * EMAIL_PROVIDER: "brevo" (domyślnie) albo "resend". Wartość nieznana kończy się
+ * błędem, a nie cichym wybraniem dostawcy — literówka w nazwie dostawcy nie może
+ * wyglądać jak awaria sieci.
+ *
+ * Wyjątek od reguły: gdy wprost wskazanego dostawcę wybrano DOMYŚLNIE, a brakuje
+ * mu klucza, schodzimy na drugiego dostawcę, jeśli ten ma klucz. Dzięki temu
+ * istniejąca konfiguracja z samym RESEND_API_KEY działa dalej, mimo że domyślnym
+ * dostawcą jest teraz Brevo. Świadomy wybór (EMAIL_PROVIDER ustawione wprost)
+ * nie podlega temu zejściu — wtedy brak klucza to błąd, nie niespodzianka.
+ */
+async function sendEmail(env: Env, subject: string, html: string): Promise<void> {
+  const requested = (env.EMAIL_PROVIDER ?? '').trim().toLowerCase();
+  const explicit = requested !== '';
+  if (explicit && requested !== 'brevo' && requested !== 'resend') {
+    throw new Error(
+      `E-mail: nieznany EMAIL_PROVIDER "${requested}" — dozwolone wartości to "brevo" albo "resend".`,
+    );
+  }
+  const provider: EmailProvider = explicit ? (requested as EmailProvider) : DEFAULT_EMAIL_PROVIDER;
+
+  if (provider === 'brevo') {
+    if (!env.BREVO_API_KEY && !explicit && env.RESEND_API_KEY) {
+      return sendViaResend(env, subject, html);
+    }
+    return sendViaBrevo(env, subject, html);
+  }
+
+  if (!env.RESEND_API_KEY && !explicit && env.BREVO_API_KEY) {
+    return sendViaBrevo(env, subject, html);
+  }
+  return sendViaResend(env, subject, html);
 }
 
 /**
@@ -213,13 +294,23 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
       registry,
       alertKey(candidate.symbol, candidate.earnings.date, 'T30'),
     );
-    const text = formatAlertHtml(candidate, 'telegram');
-    const body = isEscalation ? `<i>Eskalacja — układ się poprawił.</i>\n${text}` : text;
+
+    // Treść budujemy OSOBNO dla każdego kanału — to nie jest duplikacja, a konieczność:
+    //  - Telegram: HTML w wąskim podzbiorze (<b>, <i>, <code>) i ze znakami & < >
+    //    zamienionymi na encje, bo inaczej nazwa spółki z "&" rozwaliłaby wiadomość.
+    //  - E-mail: pełny HTML (akapity, <hr>, kolory) i treść NIE escapowana, bo
+    //    escapowanie pokazałoby użytkownikowi dosłowne znaczniki zamiast formatowania.
+    const escalationNote = isEscalation ? '<i>Eskalacja — układ się poprawił.</i>\n' : '';
+    const telegramBody = escalationNote + formatAlertHtml(candidate, 'telegram');
+    const emailHtml = formatAlertHtml(candidate, 'email');
+    const emailBody = isEscalation
+      ? `<p><b>Eskalacja — układ się poprawił.</b></p>${emailHtml}`
+      : emailHtml;
 
     const deliveredTo: string[] = [];
     if (wantsTelegram) {
       try {
-        await sendTelegram(env, body);
+        await sendTelegram(env, telegramBody);
         deliveredTo.push('telegram');
       } catch (err) {
         out.errors.push(`${candidate.symbol} telegram: ${err instanceof Error ? err.message : String(err)}`);
@@ -227,7 +318,7 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
     }
     if (wantsEmail) {
       try {
-        await sendEmail(env, alertSubject(candidate), escapeTg(body));
+        await sendEmail(env, alertSubject(candidate), emailBody);
         deliveredTo.push('email');
       } catch (err) {
         out.errors.push(`${candidate.symbol} email: ${err instanceof Error ? err.message : String(err)}`);

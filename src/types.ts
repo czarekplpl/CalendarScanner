@@ -44,8 +44,14 @@ export interface IvPoint {
   daysToEarnings: number;
   /** IV opcji ATM, w ułamku (0.45 = 45%) */
   atmIv: number;
-  /** Skąd wzięliśmy IV: od dostawcy albo policzone z cen */
-  ivSource: 'provider' | 'computed';
+  /**
+   * Skąd wzięliśmy IV:
+   *  - 'provider' — pole od dostawcy (np. tasty trade /market-metrics albo greki ORATS)
+   *  - 'computed' — nasz solver Black-Scholes z cen opcji ATM
+   *  - 'model'    — IV indeksu spółki jako szacunek, gdy brak notowań opcji.
+   *                 Oznaczone jawnie, bo to NIE jest IV tego wygaśnięcia.
+   */
+  ivSource: 'provider' | 'computed' | 'model';
   /** Cena ATM straddle (call + put) — koszt "ruchu" wycenianego przez rynek */
   straddleMid: number;
   /** Wskaźnik zmienności implikowanej: straddle / spot (ułamek ceny) */
@@ -140,6 +146,16 @@ export interface Env {
   FINNHUB_API_KEY?: string;
   TRADIER_API_KEY?: string;
   POLYGON_API_KEY?: string;
+
+  // ── tastytrade Open API (OAuth2) ───────────────────────────────────────────
+  // Uwaga: sandbox i produkcja mają OSOBNE poświadczenia — nie działają zamiennie.
+  TASTYTRADE_CLIENT_ID?: string;
+  TASTYTRADE_CLIENT_SECRET?: string;
+  TASTYTRADE_REFRESH_TOKEN?: string;
+
+  // ── E-mail ─────────────────────────────────────────────────────────────────
+  // Brevo API v3 wymaga klucza API (xkeysib-...), NIE klucza SMTP (xsmtpsib-...).
+  BREVO_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
   RESEND_API_KEY?: string;
@@ -148,6 +164,8 @@ export interface Env {
   EARNINGS_PROVIDER?: string;
   OPTIONS_PROVIDER?: string;
   TRADIER_ENV?: string;
+  TASTYTRADE_ENV?: string;
+  EMAIL_PROVIDER?: string;
   ALERT_MIN_DAYS?: string;
   ALERT_MAX_DAYS?: string;
   MAX_DEEP_ANALYSIS?: string;
