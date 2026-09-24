@@ -31,6 +31,7 @@
 
 import { fetchJson, HttpError, RateLimiter } from '../core/http.ts';
 import { atmIvFromQuotes, yearsFromDays } from '../core/blackscholes.ts';
+import { selectOptionPrice, type PriceSelection } from '../core/pricing.ts';
 import { daysBetween } from '../core/market.ts';
 import type { Env, IvPoint } from '../types.ts';
 
@@ -115,16 +116,19 @@ function toNumber(value: string | number | undefined | null): number | undefined
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** Cena środkowa z bid/ask; gdy brak rynku — mid/mark/last/close. */
-function midFromQuote(q: MarketDataItem): { mid: number; spreadPct: number } {
-  const bid = toNumber(q.bid) ?? 0;
-  const ask = toNumber(q.ask) ?? 0;
-  if (bid > 0 && ask > 0 && ask >= bid) {
-    const mid = (bid + ask) / 2;
-    return { mid, spreadPct: mid > 0 ? (ask - bid) / mid : 1 };
+/**
+ * Cena opcji wg wspólnej reguły (patrz core/pricing.ts).
+ * tastytrade podaje dodatkowo `mid` i `mark` od dostawcy — używamy ich tylko
+ * wtedy, gdy nie ma bid/ask ani ostatniej transakcji.
+ */
+function priceFromQuote(q: MarketDataItem): PriceSelection {
+  const base = selectOptionPrice({ bid: toNumber(q.bid), ask: toNumber(q.ask), last: toNumber(q.last), close: toNumber(q.close) });
+  if (base.price > 0) return base;
+  const providerMid = toNumber(q.mid) ?? toNumber(q.mark);
+  if (providerMid !== undefined && providerMid > 0) {
+    return { ...base, price: providerMid, warning: 'Brak bid/ask i last — użyto ceny środkowej od dostawcy.' };
   }
-  const fallback = toNumber(q.mid) ?? toNumber(q.mark) ?? toNumber(q.last) ?? toNumber(q.close) ?? 0;
-  return { mid: fallback, spreadPct: 1 };
+  return base;
 }
 
 export interface TastytradeCredentials {
@@ -413,10 +417,10 @@ export class TastytradeAdapter {
       const cq = bySymbol.get(callSym);
       const pq = bySymbol.get(putSym);
       if (cq && pq) {
-        const cm = midFromQuote(cq);
-        const pm = midFromQuote(pq);
-        if (cm.mid > 0 && pm.mid > 0) {
-          straddleMid = cm.mid + pm.mid;
+        const cm = priceFromQuote(cq);
+        const pm = priceFromQuote(pq);
+        if (cm.price > 0 && pm.price > 0) {
+          straddleMid = cm.price + pm.price;
           atmSpreadPct = Math.max(cm.spreadPct, pm.spreadPct);
           quotesAvailable = true;
         }
@@ -480,6 +484,8 @@ export class TastytradeAdapter {
       atmOpenInterest: liquidityToOpenInterestProxy(metrics.liquidityRating),
       atmSpreadPct,
       strikeCount,
+      // Skąd wzięliśmy ceny — jeśli z modelu (brak notowań), IV też jest szacunkiem.
+      pricingSource: quotesAvailable ? 'mid/last' : 'brak-rynku',
     };
   }
 }

@@ -19,6 +19,9 @@
  */
 
 import { runScan, SCANNER_VERSION, readScanConfig } from './core/scan.ts';
+import { archiveDailyScan, archiveSpan, loadArchiveIndex, loadArchivedScans } from './core/archive.ts';
+import { CANDIDATE_COLUMNS, rowsFromScans, toCsv } from './core/dataset.ts';
+import { checkD1Schema, writeScanToD1 } from './core/d1.ts';
 import { dispatchAlerts } from './alerts/index.ts';
 import { renderDashboard } from './ui/dashboard.ts';
 import { UNIVERSE_SNAPSHOT } from './data/universe-snapshot.ts';
@@ -40,10 +43,14 @@ export default {
         return await handleDashboard(env);
       }
       if (path === '/api/health' && request.method === 'GET') {
-        return json(healthReport(env));
+        return json(await healthReport(env));
       }
       if (path === '/api/universe' && request.method === 'GET') {
         return json({ count: UNIVERSE_SNAPSHOT.length, universe: UNIVERSE_SNAPSHOT });
+      }
+      if (path === '/api/export' && request.method === 'GET') {
+        if (!authorized(request, env)) return unauthorized();
+        return await handleExport(env, url);
       }
       if (path === '/api/scan' && (request.method === 'GET' || request.method === 'POST')) {
         if (!authorized(request, env)) return unauthorized();
@@ -71,6 +78,22 @@ export default {
     console.log(`[scanner] cron start ${event.cron} (${new Date().toISOString()})`);
     try {
       const scan = await runScan(env);
+
+      // Archiwum PRZED wszystkim innym: to jedyny nieodwracalny krok. Jeśli
+      // alerty albo zapis "ostatniego skanu" padną, migawka dnia i tak zostanie.
+      ctx.waitUntil(archiveDailyScan(env, scan));
+
+      // D1 (baza pod backtest) — po archiwum KV, bo KV jest źródłem prawdy,
+      // a D1 warstwą analityczną. Awaria D1 nie przerywa skanu.
+      ctx.waitUntil(
+        writeScanToD1(env, scan).then((r) => {
+          if (r.attempted) {
+            console.log(`[scanner] D1: kandydaci=${r.candidatesWritten} watchlist=${r.watchlistWritten}`);
+          } else if (r.skippedReason) {
+            console.log(`[scanner] D1 pominięte: ${r.skippedReason}`);
+          }
+        }),
+      );
 
       // Alerty PRZED zapisem skanu. Kolejność ma znaczenie: dispatchAlerts ustawia
       // scan.counts.alertsSent, więc zapis przed wysyłką utrwaliłby alertsSent=0
@@ -162,7 +185,81 @@ async function handleScan(
   );
 }
 
-function healthReport(env: Env): Record<string, unknown> {
+/**
+ * Eksport danych do backtestu.
+ *
+ *   GET /api/export              -> JSON z migawkami (domyślnie 60 dni)
+ *   GET /api/export?format=csv   -> CSV wg schematu (gotowy do pandas/Excela)
+ *   GET /api/export?format=info  -> co jest w archiwum, bez pobierania danych
+ *   GET /api/export?from=&to=&limit=
+ *
+ * Domyślnie oddajemy NAJNOWSZE dni (limit 60). Rok danych to ~kilka MB JSON —
+ * przy większych eksportach trzeba podnieść limit świadomie parametrem.
+ */
+async function handleExport(env: Env, url: URL): Promise<Response> {
+  const format = (url.searchParams.get('format') ?? 'json').toLowerCase();
+  const from = url.searchParams.get('from') ?? undefined;
+  const to = url.searchParams.get('to') ?? undefined;
+  const limitRaw = Number(url.searchParams.get('limit') ?? '60');
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 400)) : 60;
+
+  if (!env.STATE) {
+    return json(
+      {
+        error: 'Brak namespace KV — archiwum nie działa',
+        hint: 'Bez KV nie ma gdzie zapisywać migawek. Utwórz namespace i podepnij go w wrangler.toml (sekcja [[kv_namespaces]]).',
+      },
+      503,
+    );
+  }
+
+  if (format === 'info') {
+    const index = await loadArchiveIndex(env);
+    const span = archiveSpan(index);
+    const totalCandidates = index.days.reduce((sum, d) => sum + (d.candidates ?? 0), 0);
+    return json({
+      archivedDays: span.days,
+      oldest: span.oldest ?? null,
+      newest: span.newest ?? null,
+      totalCandidatesArchived: totalCandidates,
+      daysWithCandidates: index.days.filter((d) => (d.candidates ?? 0) > 0).length,
+      recentDays: index.days.slice(-20),
+      hint:
+        span.days < 30
+          ? 'Danych jest jeszcze mało — backtest ma sens po kilku miesiącach zbierania. Uruchom teraz archiwizację, żeby nie tracić kolejnych dni.'
+          : 'Zakres pozwala już na wstępną analizę sezonową.',
+    });
+  }
+
+  const { scans, missing, truncated } = await loadArchivedScans(env, { from, to, limit });
+  const rows = rowsFromScans(scans);
+
+  if (format === 'csv') {
+    return new Response(toCsv(CANDIDATE_COLUMNS, rows), {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="candidates-${scans[0]?.asOf ?? 'brak'}_${scans[scans.length - 1]?.asOf ?? 'brak'}.csv"`,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  }
+
+  return json({
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    scansIncluded: scans.length,
+    candidatesIncluded: rows.length,
+    truncated,
+    missingDates: missing,
+    note: truncated
+      ? `Zwrócono najnowsze ${limit} dni. Zwiększ ?limit= (max 400) albo zawęź ?from=/?to=, żeby pobrać więcej.`
+      : 'Zwrócono wszystkie dni z zakresu.',
+    scans,
+  });
+}
+
+async function healthReport(env: Env): Promise<Record<string, unknown>> {
   const cfg = readScanConfig(env);
   const channels = (env.ALERT_CHANNELS ?? 'dashboard').split(',').map((s) => s.trim());
   const missing: string[] = [];
@@ -206,7 +303,33 @@ function healthReport(env: Env): Record<string, unknown> {
     newYorkTime: timeInNewYork(),
     config: cfg,
     alertChannels: channels,
-    state: env.STATE ? 'KV podpięte (IV rank i deduplikacja alertów działają)' : 'BRAK KV — IV rank i deduplikacja wyłączone',
+    state: env.STATE
+      ? 'KV podpięte (IV rank, deduplikacja alertów i archiwum do backtestu działają)'
+      : 'BRAK KV — IV rank, deduplikacja ORAZ ARCHIWUM DO BACKTESTU wyłączone. To krytyczne: bez KV dane przepadają.',
+    d1: env.DB
+      ? await checkD1Schema(env)
+      : {
+          ok: false,
+          detail:
+            'Brak bindingu DB — dane do backtestu trafiają tylko do KV i eksportu CSV. ' +
+            'Żeby włączyć D1: utwórz bazę (npx wrangler d1 create earnings-iv-scanner), ' +
+            'odkomentuj sekcję [[d1_databases]] w wrangler.toml i zastosuj schema.sql.',
+        },
+    archive: env.STATE
+      ? await (async () => {
+          const index = await loadArchiveIndex(env);
+          const span = archiveSpan(index);
+          return {
+            days: span.days,
+            oldest: span.oldest ?? null,
+            newest: span.newest ?? null,
+            note:
+              span.days < 30
+                ? 'Za mało dni na backtest — dane zbierają się od pierwszego przebiegu.'
+                : 'Zakres pozwala na wstępną analizę.',
+          };
+        })()
+      : null,
     universeSize: UNIVERSE_SNAPSHOT.length,
     missing,
     nextSteps: missing.length > 0 ? 'Ustaw brakujące sekrety: npx wrangler secret put NAZWA' : 'Konfiguracja kompletna.',

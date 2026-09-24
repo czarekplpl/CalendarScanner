@@ -160,6 +160,9 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
 
   const result: ScanResult = {
     generatedAt: new Date().toISOString(),
+    // Wersja w wyniku: bez niej nie odróżnisz w archiwum wierszy z różnych
+    // wersji logiki, a to jest warunek uczciwego backtestu.
+    scannerVersion: SCANNER_VERSION,
     asOf,
     config: {
       alertMinDays: cfg.alertMinDays,

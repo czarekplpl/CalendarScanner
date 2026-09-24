@@ -18,6 +18,7 @@
 
 import { fetchJson, HttpError, RateLimiter } from '../core/http.ts';
 import { atmIvFromQuotes, impliedMoveFromStraddle, yearsFromDays } from '../core/blackscholes.ts';
+import { selectOptionPrice, type PriceSelection } from '../core/pricing.ts';
 import { daysBetween, thirdFriday } from '../core/market.ts';
 import type { IvPoint } from '../types.ts';
 
@@ -68,16 +69,27 @@ function asArray<T>(v: T | T[] | null | undefined): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
-/** Cena środkowa z bid/ask; gdy brak rynku — last, potem close. Zwraca też spread w %. */
-function midPrice(o: TradierOption): { mid: number; spreadPct: number; fromMarket: boolean } {
-  const bid = typeof o.bid === 'number' ? o.bid : 0;
-  const ask = typeof o.ask === 'number' ? o.ask : 0;
-  if (bid > 0 && ask > 0 && ask >= bid) {
-    const mid = (bid + ask) / 2;
-    return { mid, spreadPct: mid > 0 ? (ask - bid) / mid : 1, fromMarket: true };
-  }
-  const fallback = typeof o.last === 'number' && o.last > 0 ? o.last : typeof o.close === 'number' ? o.close : 0;
-  return { mid: fallback, spreadPct: 1, fromMarket: false };
+/**
+ * Cena opcji wg wspólnej reguły (patrz core/pricing.ts).
+ *
+ * Krótko: wąski spread => środek widełek; szeroki spread z ostatnią transakcją
+ * w środku => cena transakcji, bo środek szerokiego spreadu bywa fikcją.
+ */
+function optionPrice(o: TradierOption): PriceSelection {
+  return selectOptionPrice({ bid: o.bid, ask: o.ask, last: o.last, close: o.close });
+}
+
+/**
+ * Łączy źródła cen obu nóg w jedną etykietę.
+ * Gdy nogi różnią się źródłem, podajemy oba — w archiwum to sygnał, że wycena
+ * struktury opiera się na mieszanych danych (np. płynny call i cienki put).
+ */
+function pickPricingSource(call: PriceSelection, put: PriceSelection): string {
+  const label = (sel: PriceSelection) =>
+    sel.source === 'mid' ? 'mid' : sel.source === 'last' ? 'last' : sel.source === 'last-outside-spread' ? 'last-poza-widelkami' : 'brak-rynku';
+  const c = label(call);
+  const p = label(put);
+  return c === p ? c : `${c}+${p}`;
 }
 
 export interface TradierEnvOptions {
@@ -205,16 +217,16 @@ export class TradierAdapter {
     }
     if (!best) return undefined;
 
-    const callMid = midPrice(best.call);
-    const putMid = midPrice(best.put);
-    if (callMid.mid <= 0 && putMid.mid <= 0) return undefined;
+    const callMid = optionPrice(best.call);
+    const putMid = optionPrice(best.put);
+    if (callMid.price <= 0 && putMid.price <= 0) return undefined;
 
     const computed = atmIvFromQuotes({
       spot,
       strike: best.strike,
       daysToExpiry: dte,
-      callMid: callMid.mid,
-      putMid: putMid.mid,
+      callMid: callMid.price,
+      putMid: putMid.price,
       rate: this.opts.riskFreeRate,
     });
 
@@ -239,7 +251,7 @@ export class TradierAdapter {
       ivSource = 'computed';
     }
 
-    const straddleMid = callMid.mid + putMid.mid;
+    const straddleMid = callMid.price + putMid.price;
     const strikesWithBothSides = calls.filter(
       (c) => typeof c.strike === 'number' && putsByStrike.has(c.strike),
     ).length;
@@ -254,6 +266,9 @@ export class TradierAdapter {
       impliedMovePct: impliedMoveFromStraddle(straddleMid, spot),
       atmOpenInterest: (best.call.open_interest ?? 0) + (best.put.open_interest ?? 0),
       atmSpreadPct: Math.max(callMid.spreadPct, putMid.spreadPct),
+      // Zapisujemy, skąd wzięliśmy ceny — w archiwum do backtestu to rozróżnia
+      // wyceny oparte na realnych transakcjach od tych opartych na środku widełek.
+      pricingSource: pickPricingSource(callMid, putMid),
       strikeCount: strikesWithBothSides,
     };
   }

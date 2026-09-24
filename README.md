@@ -355,6 +355,95 @@ Jeśli w układzie występuje **którykolwiek** z problemów krytycznych, ocena 
 
 ---
 
+## 4a. Zbieranie danych do backtestu (KV + D1)
+
+Skaner **od pierwszego uruchomienia** archiwizuje dane potrzebne do późniejszego
+backtestu. Pełny opis pól: [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md).
+
+### Dlaczego to jest wbudowane, a nie "dodamy później"
+
+Większości potrzebnych wartości **nie da się odtworzyć po fakcie** — nie ma ich
+w żadnym darmowym źródle historycznym:
+
+- term structure (IV frontu i backu) dla konkretnych wygaśnięć,
+- IV rank z dnia sygnału,
+- implied move, spread bid-ask, open interest / rating płynności,
+- data wyników **w wersji, którą system wtedy widział** (spółki ją przesuwają).
+
+Jeśli nie zapiszesz ich w dniu skanu, przepadają. Dlatego archiwizacja jest
+domyślnie włączona i nie wymaga konfiguracji.
+
+### Trzy warstwy przechowywania
+
+| Warstwa | Co trzyma | Rola |
+|---|---|---|
+| KV `scan:day:YYYY-MM-DD` | pełna migawka skanu | źródło prawdy, przeżyje restart |
+| **D1 (SQLite)** | wiersze w tabelach `scan_candidates`, `outcomes`, `scan_runs` | **analiza SQL** |
+| `/api/export?format=csv` | CSV wg schematu | pandas / Excel / kopia w git |
+
+### Konfiguracja D1 (zalecana)
+
+D1 to baza SQLite w Cloudflare — darmowy plan daje **5 GB, 5 mln odczytów i 100 000
+zapisów dziennie**. Nasze zużycie to ~100 wierszy na dzień, czyli **0,1% limitu**.
+
+```bash
+npx wrangler d1 create earnings-iv-scanner
+# wklej database_id do wrangler.toml (sekcja [[d1_databases]])
+npx wrangler d1 execute earnings-iv-scanner --remote --file=./schema.sql
+```
+
+Po wdrożeniu sprawdź `/api/health` — sekcja `d1` powie, czy tabele istnieją.
+
+> Bez D1 skaner działa normalnie: dane idą do KV i można je pobrać przez
+> `/api/export`. D1 dodaje możliwość odpytywania ich po SQL.
+
+### Pobieranie danych
+
+```bash
+# Co jest w archiwum (bez pobierania danych)
+curl -H "x-api-key: TWOJ_KLUCZ" "https://twoj-worker.workers.dev/api/export?format=info"
+
+# CSV gotowy do pandas
+curl -H "x-api-key: TWOJ_KLUCZ" "https://twoj-worker.workers.dev/api/export?format=csv" > candidates.csv
+
+# JSON z pełnymi migawkami (domyślnie 60 dni, max 400)
+curl -H "x-api-key: TWOJ_KLUCZ" "https://twoj-worker.workers.dev/api/export?from=2026-09-01&limit=200" > dane.json
+```
+
+### Zapytania SQL po zebraniu danych
+
+```sql
+-- Czy ocena A faktycznie poprzedzała większe ruchy?
+SELECT c.grade, COUNT(*) AS n, ROUND(AVG(o.realized_move_pct) * 100, 2) AS avg_move_pct
+FROM scan_candidates c
+JOIN outcomes o ON o.symbol = c.symbol AND o.earnings_date = c.earnings_date
+WHERE c.earnings_confirmed = 1
+GROUP BY c.grade ORDER BY c.grade;
+```
+
+Więcej przykładów: [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md) §6.
+
+### Ile czekać na sensowny backtest
+
+| Okres zbierania | Co już widać |
+|---|---|
+| 2 tygodnie | NIC — za mało na wnioski, ale dane się nie marnują |
+| 1 kwartał (sezon wyników) | pierwsze porównanie sygnałów w jednym sezonie |
+| 2-3 kwartały | porównanie między sezonami, weryfikacja filtrów |
+| rok | pełny cykl roczny, wiarygodne statystyki |
+
+To jest ograniczenie fizyczne: sezon wyników to ~4 okna w roku, a każda spółka
+raportuje raz na kwartał. Nie da się tego przyspieszyć — można tylko nie tracić dni.
+
+### Wyniki (`outcomes`) — uzupełniane później
+
+Tabela `outcomes` czeka na dane o tym, co się faktycznie stało (realny ruch po
+wynikach, P&L kalendarza). Te **da się** dociągnąć wstecz z dostawcy historii cen,
+więc nie trzeba ich zbierać na bieżąco. Skaner przygotowuje na nie miejsce i klucz
+powiązania `(symbol, earnings_date)`.
+
+---
+
 ## 5. Konfiguracja
 
 Wszystko w `[vars]` w `wrangler.toml`. Zmiana wymaga `npx wrangler deploy`.
@@ -411,6 +500,10 @@ src/
   types.ts                  typy współdzielone
   core/
     scan.ts                 orkiestracja skanu (kalendarz → uniwersum → ocena)
+    pricing.ts              wybór ceny opcji (mid vs last — patrz niżej)
+    dataset.ts              wiersze do backtestu + CSV (RFC 4180)
+    d1.ts                   zapis do bazy D1 (idempotentny, partiami)
+    archive.ts              archiwum dzienne migawek w KV
     scoring.ts              ocena kalendarza — CAŁA logika decyzyjna + uzasadnienia
     blackscholes.ts         BS, solver IV (kryterium stopu w przestrzeni IV), greki
     market.ts               kalendarz sesji US, święta, dni sesyjne
@@ -424,6 +517,8 @@ src/
   data/
     universe-snapshot.ts    200 spółek (snapshot wrzesień 2026)
     etf-universe.ts         38 płynnych ETF-ów
+schema.sql                  schemat D1 (tabele + indeksy) — patrz sekcja 4a
+docs/DATA_SCHEMA.md         pełny opis pól do backtestu i czego nie da się odtworzyć
 scripts/scan-local.ts       lokalny skan bez Cloudflare
 test/                       testy (109 przypadków)
   blackscholes.test.ts      matematyka: BS, parytet, solver IV, kalendarz sesji
@@ -441,8 +536,9 @@ test/                       testy (109 przypadków)
 ## 8. Testy
 
 ```bash
-npm test           # 109 testów: matematyka, kalendarz, scoring, wybór nóg, parsowanie API,
-                   #           wysyłka alertów, adaptery (tradier/tastytrade/brevo) i pełny przepływ end-to-end
+npm test           # 147 testów: matematyka, kalendarz, scoring, wybór nóg, wybór ceny opcji,
+                   #           parsowanie API, wysyłka alertów, adaptery, warstwa danych (CSV+D1)
+                   #           i pełny przepływ end-to-end
 npm run typecheck  # TypeScript strict — przechodzi bez błędów
 npx wrangler deploy --dry-run   # sprawdza, że bundel się buduje, bez wdrażania
 ```

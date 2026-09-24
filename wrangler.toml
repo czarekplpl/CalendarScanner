@@ -95,3 +95,19 @@ MAX_ALERTS_PER_RUN = "25"
 # [[kv_namespaces]]
 # binding = "STATE"
 # id = "WKLEJ_TUTAJ_ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D1 — baza SQLite na dane do backtestu (ZALECANE)
+# Dlaczego D1, a nie samo KV: KV trzyma migawki jako JSON i nie da się po nich
+# zapytać. D1 daje SQL i indeksy, a darmowy plan to 5 GB, 5 mln odczytów i
+# 100 000 zapisów dziennie — nasze zużycie to ~100 wierszy/dzień (0,1% limitu).
+#
+# Utwórz bazę i wklej id poniżej:
+#   npx wrangler d1 create earnings-iv-scanner
+# Następnie zastosuj schemat:
+#   npx wrangler d1 execute earnings-iv-scanner --remote --file=./schema.sql
+# ─────────────────────────────────────────────────────────────────────────────
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "earnings-iv-scanner"
+# database_id = "WKLEJ_TUTAJ_ID"

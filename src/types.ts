@@ -62,6 +62,15 @@ export interface IvPoint {
   atmSpreadPct: number;
   /** Liczba strike'ów z rynkiem w łańcuchu — proxy głębokości rynku */
   strikeCount: number;
+  /**
+   * Z której ceny policzono IV i implied move:
+   *  - 'mid'                 — środek widełek bid/ask (rynek płynny)
+   *  - 'last'                — ostatnia transakcja (szeroki spread, ale realny handel)
+   *  - 'last-poza-widelkami' — last poza widełkami; przy dużej odległości użyto mid
+   *  - 'brak-rynku'          — brak bid/ask i last (wycena z close)
+   * Do analizy: wiersze z 'brak-rynku' traktuj ostrożnie, bo IV z nich jest niepewna.
+   */
+  pricingSource?: string;
 }
 
 /** Składowe oceny — pokazywane użytkownikowi, żeby wiedział ZA CO jest punkt. */
@@ -106,6 +115,8 @@ export interface CalendarCandidate {
 
 export interface ScanResult {
   generatedAt: string;
+  /** Wersja skanera, która wygenerowała wynik — do proweniencji danych w archiwum. */
+  scannerVersion?: string;
   /** Data sesyjna, dla której liczono */
   asOf: string;
   config: {
@@ -143,6 +154,8 @@ export interface AlertRecord {
 /** Zmienne środowiskowe workera (wrangler.toml [vars] + sekrety). */
 export interface Env {
   STATE?: KVNamespace;
+  /** Baza D1 na dane do backtestu (opcjonalna — archiwum KV działa bez niej). */
+  DB?: D1Database;
   FINNHUB_API_KEY?: string;
   TRADIER_API_KEY?: string;
   POLYGON_API_KEY?: string;
