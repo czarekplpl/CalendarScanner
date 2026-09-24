@@ -79,28 +79,17 @@ export default {
     try {
       const scan = await runScan(env);
 
-      // Archiwum PRZED wszystkim innym: to jedyny nieodwracalny krok. Jeśli
-      // alerty albo zapis "ostatniego skanu" padną, migawka dnia i tak zostanie.
-      ctx.waitUntil(archiveDailyScan(env, scan));
-
-      // D1 (baza pod backtest) — po archiwum KV, bo KV jest źródłem prawdy,
-      // a D1 warstwą analityczną. Awaria D1 nie przerywa skanu.
-      ctx.waitUntil(
-        writeScanToD1(env, scan).then((r) => {
-          if (r.attempted) {
-            console.log(`[scanner] D1: kandydaci=${r.candidatesWritten} watchlist=${r.watchlistWritten}`);
-          } else if (r.skippedReason) {
-            console.log(`[scanner] D1 pominięte: ${r.skippedReason}`);
-          }
-        }),
-      );
-
       // Alerty PRZED zapisem skanu. Kolejność ma znaczenie: dispatchAlerts ustawia
       // scan.counts.alertsSent, więc zapis przed wysyłką utrwaliłby alertsSent=0
       // i dashboard pokazywałby "0 alertów" mimo wysłanych powiadomień.
       const dispatch = await dispatchAlerts(env, scan);
-      ctx.waitUntil(storeScan(env, scan));
-      ctx.waitUntil(storeAlertErrors(env, dispatch.errors));
+
+      // ZAPISY CZEKAMY, NIE waitUntil. Powód: `waitUntil` bywa przerywany, gdy
+      // izolat zostanie zwolniony po zakończeniu żądania — a wtedy dane do
+      // backtestu przepadają BEZ ŚLADU. Sprawdzone empirycznie: po skanie przez
+      // API w KV i D1 nie było ANI JEDNEGO wiersza. Opóźnienie rzędu sekundy
+      // jest nieistotne wobec utraty nieodtwarzalnych danych.
+      await persistScan(env, scan, dispatch.errors);
 
       console.log(
         `[scanner] cron koniec: kandydaci=${scan.counts.candidates} alerty=${dispatch.sent} ` +
@@ -159,10 +148,12 @@ async function handleScan(
   let alertStats: Awaited<ReturnType<typeof dispatchAlerts>> | undefined;
   if (!scan || refresh) {
     scan = await runScan(env);
-    ctx.waitUntil(storeScan(env, scan));
     if (wantsAlerts) {
       alertStats = await dispatchAlerts(env, scan);
     }
+    // Ręczne uruchomienie MUSI zapisywać tak samo jak cron — wcześniej tego
+    // brakowało i skan przez API nie trafiał ani do archiwum, ani do D1.
+    await persistScan(env, scan, alertStats?.errors ?? []);
   }
 
   const cfg = readScanConfig(env);
@@ -263,8 +254,22 @@ async function healthReport(env: Env): Promise<Record<string, unknown>> {
   const cfg = readScanConfig(env);
   const channels = (env.ALERT_CHANNELS ?? 'dashboard').split(',').map((s) => s.trim());
   const missing: string[] = [];
-  if (!env.FINNHUB_API_KEY) missing.push('FINNHUB_API_KEY (kalendarz wyników)');
-  if (!env.TRADIER_API_KEY) missing.push('TRADIER_API_KEY (łańcuchy opcji)');
+  if (!env.FINNHUB_API_KEY) {
+    // Finnhub jest potrzebny zawsze: kalendarz wyników (dla spółek pominiętych
+    // przez dostawcę opcji), historia wyników i KURSY AKCJI do wyboru strike ATM.
+    missing.push('FINNHUB_API_KEY (kalendarz wyników + kursy akcji)');
+  }
+  // Sprawdzamy poświadczenia TEGO dostawcy opcji, który jest wybrany. Wcześniej
+  // health zawsze pytał o TRADIER_API_KEY, więc konfiguracja na tastytrade
+  // pokazywała fałszywy brak klucza.
+  const wantsOptions = cfg.optionsProvider;
+  if (wantsOptions === 'tastytrade') {
+    if (!env.TASTYTRADE_CLIENT_SECRET || !env.TASTYTRADE_REFRESH_TOKEN) {
+      missing.push('TASTYTRADE_CLIENT_SECRET + TASTYTRADE_REFRESH_TOKEN (dane opcyjne)');
+    }
+  } else if (!env.TRADIER_API_KEY) {
+    missing.push('TRADIER_API_KEY (dane opcyjne)');
+  }
   if (channels.includes('telegram') && (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)) {
     missing.push('TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID');
   }
@@ -294,6 +299,24 @@ async function healthReport(env: Env): Promise<Record<string, unknown>> {
     if (!env.ALERT_EMAIL_TO || !env.ALERT_EMAIL_FROM) {
       missing.push('ALERT_EMAIL_TO + ALERT_EMAIL_FROM');
     }
+  }
+
+  // `missing` = rzeczy, które użytkownik ma ustawić (sekrety). `notices` =
+  // problemy infrastrukturalne (bindingi, uprawnienia). Rozdział jest istotny:
+  // brak bindingu naprawia się w konfiguracji Workera, a nie komendą `secret put`,
+  // więc podpowiedź „ustaw brakujące sekrety" byłaby myląca.
+  const notices: string[] = [];
+  if (!env.STATE) {
+    notices.push(
+      'Brak bindingu STATE (KV) — archiwum do backtestu i IV rank nie działają. ' +
+        'Utwórz namespace i podepnij go w wrangler.toml (sekcja [[kv_namespaces]]).',
+    );
+  }
+  if (!env.DB) {
+    notices.push(
+      'Brak bindingu DB (D1) — dane trafiają tylko do KV i eksportu CSV. ' +
+        'Utwórz bazę (npx wrangler d1 create earnings-iv-scanner) i podepnij w [[d1_databases]].',
+    );
   }
 
   return {
@@ -332,6 +355,7 @@ async function healthReport(env: Env): Promise<Record<string, unknown>> {
       : null,
     universeSize: UNIVERSE_SNAPSHOT.length,
     missing,
+    notices,
     nextSteps: missing.length > 0 ? 'Ustaw brakujące sekrety: npx wrangler secret put NAZWA' : 'Konfiguracja kompletna.',
   };
 }
@@ -397,6 +421,33 @@ async function loadScan(env: Env): Promise<ScanResult | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Utrwala wynik skanu we WSZYSTKICH warstwach, w kolejności od najważniejszej:
+ *
+ *   1. Archiwum KV — nieodtwarzalne dane (term structure, IV rank, implied move
+ *      z danego dnia). Bez tego backtest po fakcie jest niemożliwy.
+ *   2. D1 — warstwa analityczna (SQL).
+ *   3. "Ostatni skan" — to, co pokazuje dashboard.
+ *   4. Błędy alertów — żeby cicha awaria wysyłki była widoczna.
+ *
+ * Wołane przez cron ORAZ przez /api/scan. Wcześniej /api/scan nie zapisywał
+ * niczego poza "ostatnim skanem", więc ręczne uruchomienie nie zbierało danych
+ * do backtestu — a to najgorszy rodzaj błędu, bo cichy i nieodwracalny.
+ */
+async function persistScan(env: Env, scan: ScanResult, alertErrors: string[]): Promise<void> {
+  await archiveDailyScan(env, scan);
+
+  const d1 = await writeScanToD1(env, scan);
+  if (d1.attempted && d1.skippedReason) {
+    console.warn(`[scanner] D1: ${d1.skippedReason}`);
+  } else if (d1.attempted) {
+    console.log(`[scanner] D1: kandydaci=${d1.candidatesWritten} watchlist=${d1.watchlistWritten}`);
+  }
+
+  await storeScan(env, scan);
+  await storeAlertErrors(env, alertErrors);
 }
 
 async function storeScan(env: Env, scan: ScanResult): Promise<void> {

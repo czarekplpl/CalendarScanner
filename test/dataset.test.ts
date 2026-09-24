@@ -405,6 +405,58 @@ test('D1: liczba wartości zgadza się z liczbą kolumn (inaczej rozjedzie się 
   assert.deepEqual(kolumnyWSql, [...CANDIDATE_COLUMNS], 'SQL musi wymieniać wszystkie kolumny schematu');
 });
 
+test('kontrakt: schema.sql zawiera WSZYSTKIE kolumny z kodu', async () => {
+  // Ten test istnieje, bo dokładnie ten błąd wystąpił na produkcji: dodając kolumny
+  // `*_pricing_source` zaktualizowałem kod i CSV, ale zapomniałem o schema.sql.
+  // Skutek był CICHY i podstępny — skaner działał, alerty dochodziły, KV zbierało
+  // dane, a do D1 nie trafiał ANI JEDEN wiersz (błąd "table scan_candidates has no
+  // column named back_pricing_source"). Atrapa D1 w testach tego nie widziała,
+  // bo nie waliduje SQL-a względem prawdziwego schematu.
+  //
+  // Ten test porównuje kod ze schematem bez potrzeby uruchamiania bazy.
+  const { readFileSync } = await import('node:fs');
+  const schema = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
+
+  const tabela = /CREATE TABLE IF NOT EXISTS scan_candidates \(([\s\S]*?)\n\);/.exec(schema);
+  assert.ok(tabela, 'schema.sql musi definiować tabelę scan_candidates');
+
+  const kolumnyWSchemacie = [...tabela[1]!.matchAll(/^\s{2}([a-z0-9_]+)\s+(?:TEXT|INTEGER|REAL)/gm)].map(
+    (m) => m[1]!,
+  );
+  assert.ok(kolumnyWSchemacie.length > 30, `wykryto tylko ${kolumnyWSchemacie.length} kolumn — parser schematu zawiódł`);
+
+  const brakujace = CANDIDATE_COLUMNS.filter((kol) => !kolumnyWSchemacie.includes(kol));
+  assert.deepEqual(
+    brakujace,
+    [],
+    `schema.sql nie zawiera kolumn: ${brakujace.join(', ')}. ` +
+      'Dodaj je do CREATE TABLE (lub jako ALTER TABLE w sekcji MIGRACJE), ' +
+      'inaczej zapis do D1 zakończy się błędem i dane NIE trafią do bazy.',
+  );
+});
+
+test('kontrakt: kolejność kolumn w kodzie odpowiada kolejności wartości', async () => {
+  // Kolejność CANDIDATE_COLUMNS musi być zgodna z kolejnością wartości w funkcji
+  // candidateValues() z d1.ts. Rozjazd zapisałby wartość do złej kolumny — błąd
+  // cichy i trudny do wykrycia po fakcie.
+  const fake = makeD1();
+  const env = { DB: fake.db } as unknown as Env;
+  await writeScanToD1(env, scanWith([candidate()]));
+
+  const ins = fake.captured.find((c) => c.sql.includes('INSERT OR REPLACE INTO scan_candidates'))!;
+  const kolumnyWSql = ins.sql
+    .slice(ins.sql.indexOf('(') + 1, ins.sql.indexOf(')'))
+    .split(',')
+    .map((c) => c.trim());
+
+  assert.deepEqual(
+    kolumnyWSql,
+    [...CANDIDATE_COLUMNS],
+    'SQL musi wymieniać kolumny w tej samej kolejności, co CANDIDATE_COLUMNS',
+  );
+  assert.equal(ins.params.length, CANDIDATE_COLUMNS.length);
+});
+
 test('D1: brak bindingu nie wywala skanu, tylko raportuje pominięcie', async () => {
   const result = await writeScanToD1({} as Env, scanWith([candidate()]));
   assert.equal(result.attempted, false);

@@ -240,15 +240,21 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
   // Dlatego pytamy DZIEŃ PO DNIU w oknie alertu. Koszt to ~20 zapytań na przebieg
   // (a nie 200 — tyle byłoby przy pytaniu per spółka), a zysk to pewność, że nic
   // nie wypadło. Zapytania idą do cache na 12 h, więc cron 2x dziennie płaci raz.
+  const providerCovered = upcoming.size > 0;
   const finnhubAvailable = Boolean(deps.earningsAdapter || env.FINNHUB_API_KEY);
+
   if (!finnhubAvailable) {
-    if (upcoming.size === 0) {
+    if (!providerCovered) {
       errors.push(
         'Brak FINNHUB_API_KEY i brak dat wyników od dostawcy opcji — nie mam skąd wziąć kalendarza. ' +
           'Ustaw sekret: npx wrangler secret bulk .dev.vars',
       );
     }
-  } else {
+  } else if (!providerCovered) {
+    // Finnhuba pytamy TYLKO wtedy, gdy dostawca opcji nie dał żadnych dat
+    // (np. konfiguracja na Tradierze). Przy tastytrade metryki pokrywają całe
+    // uniwersum jednym zapytaniem, więc pytanie dzień po dniu byłoby marnowaniem
+    // limitu subrequestów Cloudflare — a ten limit jest twardy (patrz niżej).
     const adapter = deps.earningsAdapter ?? new FinnhubAdapter(env.FINNHUB_API_KEY as string);
     const missing = new Set([...universeBySymbol.keys()].filter((sym) => !upcoming.has(sym)));
 
@@ -256,18 +262,11 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
       const day = addDays(asOf, offset);
       let events: EarningsEvent[] = [];
       try {
-        events = await cache.wrap(
-          `calendar:day:${day}`,
-          () => adapter.listEarnings(day, day),
-          12 * 3600,
-        );
+        events = await cache.wrap(`calendar:day:${day}`, () => adapter.listEarnings(day, day), 12 * 3600);
       } catch (err) {
         errors.push(`Kalendarz ${day}: ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
-      // Wykrywanie ucięcia: jeśli dostaliśmy dokładnie 1500 wpisów, odpowiedź
-      // mogła zostać obcięta. Zgłaszamy to jawnie, żeby nie zgadywać, czy dane
-      // są pełne — cicha niekompletność jest gorsza niż widoczny błąd.
       if (events.length >= 1500) {
         errors.push(
           `Kalendarz ${day}: odpowiedź osiągnęła limit 1500 wpisów — dane mogą być niekompletne dla tego dnia.`,
@@ -330,6 +329,50 @@ export async function runScan(env: Env, deps: ScanDeps = {}): Promise<ScanResult
   // (tradier); gdy nie (tastytrade nie ma notowań na naszym poziomie uprawnień),
   // bierzemy go z Finnhuba. Pytamy TYLKO o finalistów, więc to kilkanaście żądań.
   const historyAdapter = env.FINNHUB_API_KEY ? new FinnhubAdapter(env.FINNHUB_API_KEY) : undefined;
+
+  // ── 5b. Budżet żądań ───────────────────────────────────────────────────────
+  // Cloudflare ogranicza liczbę subrequestów na JEDNO wywołanie Workera (osobny,
+  // niższy limit na planie darmowym). Skan potrzebuje:
+  //   1 (metryki) + 1 na spółkę (kurs) + 2 na spółkę (łańcuchy front/back)
+  // czyli ~3 żądania na analizowaną spółkę + stała część.
+  //
+  // Gdy limit zostanie przekroczony, API zwraca błąd i CZĘŚĆ SPÓŁEK po cichu
+  // wypada z analizy — dokładnie to się zdarzyło przy 16 spółkach. Dlatego
+  // liczymy budżet Z GÓRY i przycinamy listę, zamiast tracić dane w połowie.
+  const SUBREQUEST_LIMIT = 45;
+  const FIXED_COST = 3; // metryki + ew. kalendarz + jeden zapas
+  // Koszt na spółkę: 1 żądanie o kurs akcji (Finnhub) + 1 zapas na ewentualny
+  // łańcuch opcji. Terminy wygaśnięć i IV bierzemy z metryk, które są już
+  // pobrane zbiorczo, więc NIE płacimy za nie osobno.
+  const PER_SYMBOL = 2;
+  const maxAffordable = Math.max(1, Math.floor((SUBREQUEST_LIMIT - FIXED_COST) / PER_SYMBOL));
+  if (toAnalyze.length > maxAffordable) {
+    const odlozone = toAnalyze.splice(maxAffordable);
+    for (const s of odlozone) {
+      result.watchlistOnly.push({
+        symbol: s.symbol,
+        earningsDate: s.event.date,
+        daysToEarnings: s.daysToEarnings,
+        reason: `poza budżetem żądań Cloudflare (limit ~${SUBREQUEST_LIMIT} subrequestów na wywołanie, ~${PER_SYMBOL} na spółkę) — zwiększ limit planu albo zwęź okno alertu`,
+      });
+    }
+    errors.push(
+      `Przycięto analizę do ${maxAffordable} spółek z powodu limitu subrequestów Cloudflare ` +
+        `(było ${maxAffordable + odlozone.length}). Pozostałe są na liście obserwacyjnej.`,
+    );
+  }
+
+  // ── 5c. Prefetch łańcuchów opcji ───────────────────────────────────────────
+  // Pobieramy łańcuchy dla WSZYSTKICH analizowanych spółek z góry, równolegle,
+  // i zapisujemy w pamięci adaptera (ma cache). Dzięki temu głęboka analiza nie
+  // wykonuje już żadnych żądań sieciowych, a równoległość jest wyższa niż 3.
+  await mapLimit(toAnalyze, 6, async (item) => {
+    try {
+      await optionsAdapter.expirations(item.symbol);
+    } catch {
+      /* brak łańcucha obsłuży analyzeSymbol, zwracając undefined */
+    }
+  });
 
   // ── 6. Głęboka analiza ─────────────────────────────────────────────────────
   const { results, errors: analysisErrors } = await mapLimit(toAnalyze, 3, async (item) => {

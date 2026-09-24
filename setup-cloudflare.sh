@@ -33,11 +33,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Wrangler domyślnie pisze logi do katalogu w $HOME. Jeśli ten katalog jest
-# niedostępny (sandbox, restrykcyjne uprawnienia), wrangler kończy się błędem
-# EPERM i przerywa działanie. Jawne wskazanie /tmp usuwa ten problem —
-# potwierdzone testem: bez tej linii exit code bywa niezerowy mimo udanego builda.
-export WRANGLER_LOG_PATH="${WRANGLER_LOG_PATH:-/tmp/wrangler-logs}"
+# Wrangler tworzy katalog konfiguracji w $HOME/Library/Preferences/.wrangler
+# (macOS) i jeśli nie może, kończy się błędem EPERM PRZERYWAJĄC deploy — mimo
+# że bundel zdążył się zbudować. WRANGLER_LOG_PATH sam tego NIE rozwiązuje
+# (sprawdzone na wrangler 3.x): trzeba przekierować cały HOME.
+#
+# Robimy to TYLKO wtedy, gdy domyślny katalog jest niedostępny — użytkownik
+# w normalnym terminalu ma do niego prawo i nie chcemy mu rozrzucać configu.
+if ! mkdir -p "${HOME}/Library/Preferences/.wrangler" 2>/dev/null; then
+  export HOME="${TMPDIR:-/tmp}/wrangler-home"
+  mkdir -p "$HOME"
+  warn "Katalog konfiguracji w Twoim HOME jest niedostępny — przekierowuję HOME na $HOME"
+fi
+export WRANGLER_LOG_PATH="${WRANGLER_LOG_PATH:-${HOME}/.wrangler-logs}"
+mkdir -p "$WRANGLER_LOG_PATH" 2>/dev/null || true
 export WRANGLER_SEND_METRICS=false
 
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BOLD=$'\033[1m'; RESET=$'\033[0m'

@@ -62,6 +62,8 @@ export interface IvPoint {
   atmSpreadPct: number;
   /** Liczba strike'ów z rynkiem w łańcuchu — proxy głębokości rynku */
   strikeCount: number;
+  /** Strike wybrany jako ATM — potrzebny do zaraportowania konkretnej struktury */
+  atmStrike?: number;
   /**
    * Z której ceny policzono IV i implied move:
    *  - 'mid'                 — środek widełek bid/ask (rynek płynny)

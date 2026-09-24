@@ -357,7 +357,11 @@ test('buildIvPoint: IV z metryk dostawcy (najwyższy priorytet)', async () => {
   assert.equal(point.expiration, '2026-10-16');
   assert.equal(point.dte, 22);
   assert.equal(point.daysToEarnings, 4, '4 dni od frontu do wyników');
-  assert.equal(point.strikeCount, 5, '5 wspólnych strikeów call/put w łańcuchu');
+  // Strike NIE jest już pobierany z łańcucha, gdy mamy IV z metryk — liczymy go
+  // z kursu i interwału, żeby oszczędzić jedno z najdroższych żądań (limit
+  // subrequestów Cloudflare). Dlatego strikeCount = 0: nie znamy go bez łańcucha.
+  assert.equal(point.strikeCount, 0, 'bez pobierania łańcucha nie znamy liczby strikeów');
+  assert.ok(point.atmStrike && point.atmStrike > 0, 'strike ATM policzony z kursu');
 });
 
 test('buildIvPoint: brak IV dla terminu => schodzi do IV indeksu i oznacza model', async () => {
@@ -447,9 +451,31 @@ test('quote(): zwraca undefined — API nie daje notowań na tym poziomie uprawn
   assert.equal(calls.length, 0, 'nie marnujemy żądania na endpoint, który zwraca 403');
 });
 
-test('expirations(): zwraca unikalne, posortowane terminy', async () => {
-  const exps = await withFetch(router(), () => new TastytradeAdapter(CREDS, {}).expirations('MU')).then((r) => r.result);
-  assert.deepEqual(exps, ['2026-10-16', '2026-10-23', '2026-11-20', '2026-12-18']);
+test('expirations(): terminy pochodzą z METRYK, bez pobierania łańcucha', async () => {
+  // To jest istota optymalizacji: metryki zawierają tablicę IV per wygaśnięcie,
+  // więc terminy mamy za darmo. Łańcuch (kilka MB!) pobieramy tylko jako fallback.
+  const { result, calls } = await withFetch(router(), () =>
+    new TastytradeAdapter(CREDS, {}).expirations('MU'),
+  );
+  assert.deepEqual(
+    result,
+    ['2026-10-16', '2026-10-23', '2026-11-20'],
+    'terminy z metryk (mock ma 3 daty w tablicy IV)',
+  );
+  assert.equal(
+    calls.filter((c) => c.url.includes('/option-chains')).length,
+    0,
+    'NIE wolno pobierać łańcucha, skoro terminy są w metrykach',
+  );
+});
+
+test('expirations(): schodzi do łańcucha tylko gdy metryki nie mają terminów', async () => {
+  const { result, calls } = await withFetch(
+    router({ MU: { 'option-expiration-implied-volatilities': [] } }),
+    () => new TastytradeAdapter(CREDS, {}).expirations('MU'),
+  );
+  assert.deepEqual(result, ['2026-10-16', '2026-10-23', '2026-11-20', '2026-12-18'], 'fallback: terminy z łańcucha');
+  assert.equal(calls.filter((c) => c.url.includes('/option-chains')).length, 1, 'fallback pobiera łańcuch raz');
 });
 
 test('liquidityToOpenInterestProxy: mapuje zachowawczo, brak ratingu => 0', () => {

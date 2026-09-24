@@ -92,9 +92,9 @@ MAX_ALERTS_PER_RUN = "25"
 # Utwórz namespace i wklej id poniżej (patrz README, krok 3):
 #   npx wrangler kv namespace create STATE
 # ─────────────────────────────────────────────────────────────────────────────
-# [[kv_namespaces]]
-# binding = "STATE"
-# id = "WKLEJ_TUTAJ_ID"
+[[kv_namespaces]]
+binding = "STATE"
+id = "70e02299cb8f451588370accaca1f063"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # D1 — baza SQLite na dane do backtestu (ZALECANE)
@@ -107,7 +107,7 @@ MAX_ALERTS_PER_RUN = "25"
 # Następnie zastosuj schemat:
 #   npx wrangler d1 execute earnings-iv-scanner --remote --file=./schema.sql
 # ─────────────────────────────────────────────────────────────────────────────
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "earnings-iv-scanner"
-# database_id = "WKLEJ_TUTAJ_ID"
+[[d1_databases]]
+binding = "DB"
+database_name = "earnings-iv-scanner"
+database_id = "b4f9e520-6e6c-4274-a0f2-b3a04765c891"

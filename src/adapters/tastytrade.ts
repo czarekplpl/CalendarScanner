@@ -411,12 +411,45 @@ export class TastytradeAdapter {
     return items;
   }
 
-  /** Dostępne terminy wygaśnięcia (posortowane). */
+  /**
+   * Dostępne terminy wygaśnięcia (posortowane).
+   *
+   * ŹRÓDŁO BEZ DODATKOWYCH ŻĄDAŃ: metryki zmienności zawierają tablicę
+   * `option-expiration-implied-volatilities` z datami WSZYSTKICH wygaśnięć,
+   * dla których dostawca liczy IV. To dokładnie te terminy, których potrzebujemy
+   * do budowy kalendarza — więc nie ma po co pobierać całego łańcucha (kilka MB!).
+   *
+   * Łańcuch opcji pobieramy tylko jako FALLBACK, gdy metryk nie ma. Oszczędność
+   * jest istotna, bo Cloudflare ma twardy limit subrequestów na jedno wywołanie
+   * Workera (plan darmowy: 50), a łańcuch to jedno z droższych żądań.
+   */
   async expirations(symbol: string): Promise<string[]> {
+    const metrics = await this.marketMetrics(symbol);
+    if (metrics.expirationIvs.size > 0) {
+      return [...metrics.expirationIvs.keys()].sort();
+    }
     const items = await this.chain(symbol);
     const dates = new Set<string>();
     for (const o of items) if (o['expiration-date']) dates.add(o['expiration-date']);
     return [...dates].sort();
+  }
+
+  /**
+   * Przybliżony strike ATM BEZ pobierania łańcucha.
+   *
+   * Skąd wiemy, jaki jest interwał strike'ów? Dla płynnych spółek US to zwykle
+   * 1, 2.5, 5 lub 10 USD zależnie od poziomu kursu. Zamiast zgadywać, pobieramy
+   * łańcuch RAZ na spółkę i wyznaczamy go z realnych danych — ale robimy to
+   * dopiero w buildIvPoint, gdy naprawdę potrzebujemy dokładnego strike'u.
+   * Ta metoda służy tylko do szybkiego sprawdzenia, czy spółka ma sensowny
+   * łańcuch, i nie wykonuje żadnych żądań.
+   */
+  approximateAtmStrike(spot: number, strikeCount: number): number | undefined {
+    if (!Number.isFinite(spot) || spot <= 0 || strikeCount <= 0) return undefined;
+    // Interwał z grubsza: więcej strike'ów => gęstsza siatka. Dla typowego
+    // łańcucha (kilkadziesiąt strike'ów) 5 USD jest bezpiecznym przybliżeniem.
+    const step = strikeCount > 120 ? 1 : strikeCount > 60 ? 2.5 : strikeCount > 25 ? 5 : 10;
+    return Math.round(spot / step) * step;
   }
 
   /**
@@ -442,39 +475,49 @@ export class TastytradeAdapter {
     const dte = daysBetween(today, expiration);
     if (dte <= 0) return undefined;
 
-    const items = await this.chain(symbol);
-    const atExpiry = items.filter((o) => o['expiration-date'] === expiration);
-    if (atExpiry.length === 0) return undefined;
-
-    const calls = atExpiry.filter((o) => o['option-type'] === 'C');
-    const puts = atExpiry.filter((o) => o['option-type'] === 'P');
-    if (calls.length === 0 || puts.length === 0) return undefined;
-
-    // Strike ATM = najbliżej kursu. Ceny opcji nie potrzebujemy: IV bierzemy
-    // z metryk, a implied move liczymy modelowo z tego samego IV.
-    const putStrikes = new Set(
-      puts.map((p) => toNumber(p['strike-price'])).filter((k): k is number => k !== undefined),
-    );
-    const wspolne = calls
-      .map((c) => toNumber(c['strike-price']))
-      .filter((k): k is number => k !== undefined && putStrikes.has(k));
-    if (wspolne.length === 0) return undefined;
-
-    let atmStrike = wspolne[0]!;
-    let bestDistance = Math.abs(atmStrike - spot);
-    for (const k of wspolne) {
-      const d = Math.abs(k - spot);
-      // Przy remisie wybieramy strike NIŻSZY — mniejsze ryzyko przypisania
-      // na krótkiej nodze, gdy kurs rośnie.
-      if (d < bestDistance - 1e-9 || (Math.abs(d - bestDistance) < 1e-9 && k < atmStrike)) {
-        atmStrike = k;
-        bestDistance = d;
-      }
-    }
-
     const metrics = params.metrics ?? (await this.marketMetrics(symbol));
     const providerIv = metrics.expirationIvs.get(expiration);
     const ivIndex = normalizeIvToFraction(metrics.ivIndex);
+
+    // Strike ATM. Domyślnie liczymy go z kursu i przybliżonego interwału —
+    // BEZ pobierania łańcucha, bo to oszczędza jedno z najdroższych żądań
+    // (kilka MB na spółkę) i mieści się w limicie subrequestów Cloudflare.
+    //
+    // Łańcuch pobieramy TYLKO jako fallback, gdy dostawca nie dał żadnego IV
+    // dla tego terminu (wtedy i tak potrzebujemy potwierdzenia, że termin istnieje).
+    // Liczba strike'ów jest potrzebna scoringowi jako proxy głębokości rynku.
+    // NIE fabrykujemy jej — bierzemy prawdziwą wartość z łańcucha, gdy go
+    // pobieramy, a gdy nie pobieramy (bo mamy IV z metryk), zostaje 0.
+    // Wpisanie wymyślonej liczby zaśmiecałoby ocenę płynności.
+    let strikeCount = 0;
+    let atmStrike = this.approximateAtmStrike(spot, 40);
+
+    if (!providerIv) {
+      const items = await this.chain(symbol);
+      const atExpiry = items.filter((o) => o['expiration-date'] === expiration);
+      if (atExpiry.length === 0) return undefined;
+      const calls = atExpiry.filter((o) => o['option-type'] === 'C');
+      const puts = atExpiry.filter((o) => o['option-type'] === 'P');
+      if (calls.length === 0 || puts.length === 0) return undefined;
+      const putStrikes = new Set(
+        puts.map((p) => toNumber(p['strike-price'])).filter((k): k is number => k !== undefined),
+      );
+      const wspolne = calls
+        .map((c) => toNumber(c['strike-price']))
+        .filter((k): k is number => k !== undefined && putStrikes.has(k));
+      if (wspolne.length === 0) return undefined;
+      let best = wspolne[0]!;
+      let bestD = Math.abs(best - spot);
+      for (const k of wspolne) {
+        const d = Math.abs(k - spot);
+        if (d < bestD - 1e-9 || (Math.abs(d - bestD) < 1e-9 && k < best)) {
+          best = k;
+          bestD = d;
+        }
+      }
+      atmStrike = best;
+      strikeCount = wspolne.length;
+    }
 
     let atmIv: number;
     let ivSource: IvPoint['ivSource'];
@@ -498,11 +541,12 @@ export class TastytradeAdapter {
       ivSource,
       straddleMid,
       impliedMovePct: spot > 0 ? straddleMid / spot : 0,
+      atmStrike,
       atmOpenInterest: liquidityToOpenInterestProxy(metrics.liquidityRating),
       // Spread bid-ask nieznany bez notowań. 1 = brak danych; NIE wpisujemy 0,
       // bo zero znaczyłoby „idealnie ciasny spread" i sztucznie zawyżało ocenę.
       atmSpreadPct: 1,
-      strikeCount: wspolne.length,
+      strikeCount,
       pricingSource: 'model-brak-notowan',
     };
   }

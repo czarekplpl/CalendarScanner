@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
   back_dte                  INTEGER,
   back_iv                   REAL,
   back_iv_source            TEXT,
+  back_pricing_source       TEXT,      -- mid | last | last-poza-widelkami | brak-rynku
 
   -- relacje między nogami
   term_structure_slope      REAL,      -- back_iv - front_iv (teza strategii)
@@ -140,3 +141,22 @@ CREATE TABLE IF NOT EXISTS scan_runs (
   scanner_version   TEXT,
   PRIMARY KEY (as_of, run_at)
 );
+
+-- =============================================================================
+-- MIGRACJE
+-- =============================================================================
+-- Ten plik jest idempotentny (CREATE TABLE IF NOT EXISTS), ale NIE dodaje kolumn
+-- do istniejącej tabeli. Jeśli wdrażasz na bazę utworzoną wcześniej, zastosuj
+-- poniższe polecenia ręcznie — inaczej zapis zakończy się błędem
+-- "table scan_candidates has no column named ..." i dane NIE trafią do D1.
+--
+-- Historia zmian schematu:
+--   v1 (2026-09-24)  wersja pierwotna
+--
+-- Dodano kolumny źródeł cen (mid vs last) po pierwszym wdrożeniu:
+--   ALTER TABLE scan_candidates ADD COLUMN front_pricing_source TEXT;
+--   ALTER TABLE scan_candidates ADD COLUMN back_pricing_source TEXT;
+--
+-- UWAGA: brak tej migracji jest CICHY — skaner działa, alerty dochodzą, KV zbiera
+-- dane, a do D1 nie trafia nic. Dlatego test `kontrakt: schema.sql zawiera
+-- wszystkie kolumny z kodu` porównuje ten plik ze stałą CANDIDATE_COLUMNS.

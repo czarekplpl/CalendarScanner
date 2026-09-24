@@ -209,11 +209,22 @@ export async function writeScanToD1(env: Env, scan: ScanResult): Promise<D1Write
     await db.batch(statements);
     result.batches = statements.length;
   } catch (err) {
+    // Diagnostyka: logujemy PEŁNY błąd (z nazwą i stosem), bo komunikaty D1
+    // bywają lakoniczne, a bez szczegółów nie da się odróżnić braku uprawnień
+    // od błędu SQL czy przekroczenia limitu parametrów.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     console.warn(
-      `[scanner] zapis do D1 nie powiódł się: ${err instanceof Error ? err.message : String(err)}. ` +
+      `[scanner] zapis do D1 nie powiódł się: ${detail}. ` +
+        `Statements: ${statements.length}, kandydaci: ${scan.candidates.length}. ` +
         'Dane w KV i eksport CSV pozostają aktualne.',
     );
-    return { ...result, candidatesWritten: 0, watchlistWritten: 0, skippedReason: 'Błąd zapisu do D1' };
+    console.warn(`[scanner] D1 stos: ${err instanceof Error ? (err.stack ?? '').split('\n').slice(0, 3).join(' | ') : 'brak'}`);
+    return {
+      ...result,
+      candidatesWritten: 0,
+      watchlistWritten: 0,
+      skippedReason: `Błąd zapisu do D1: ${detail}`,
+    };
   }
 
   return result;
