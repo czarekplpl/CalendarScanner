@@ -14,10 +14,13 @@ compatibility_flags = ["nodejs_compat"]
 #
 # 14:30 UTC = 10:30 czasu Nowego Jorku (rano, 1 h po otwarciu sesji o 9:30 ET).
 #
-# DLACZEGO PO OTWARCIU, A NIE PRZED: dane zmienności z tastytrade aktualizują się
-# raz dziennie, PO zamknięciu sesji (pole implied-volatility-updated-at pokazuje
-# ~19:50 UTC dnia poprzedniego). Uruchomienie po otwarciu gwarantuje, że raport
-# zawiera NAJŚWIEŻSZY dostępny odczyt IV, a nie ten sprzed dwóch sesji.
+# DLACZEGO PO OTWARCIU, A NIE PRZED: zmienność implikowana i term structure
+# z tastytrade aktualizują się INTRADAY (pole implied-volatility-updated-at
+# pokazuje kilka minut wstecz w trakcie sesji), ale PRZED otwarciem wciąż
+# pokazują odczyt z poprzedniego dnia. Sprawdzone empirycznie:
+#   09:18 ET -> IV z wczoraj 19:52 UTC   (przed sesją, dane nieodświeżone)
+#   10:00 ET -> IV z dzisiaj 13:53 UTC   (w sesji, 7 minut świeżości)
+# Dlatego raport idzie po otwarciu — wtedy zawiera AKTUALNY odczyt.
 #
 # UWAGA O CZASIE LETNIM/ZIMOWYM: 14:30 UTC to 10:30 EDT latem i 9:30 EST zimą.
 # Strefa US przesuwa się względem UTC, więc stała godzina UTC daje w zimie

@@ -118,16 +118,22 @@ export function formatAlertHtml(c: CalendarCandidate, variant: 'telegram' | 'ema
   }
 
   if (variant === 'email') {
-    // Stopka MUSI mówić prawdę o świeżości danych. Wcześniej była tu wzmianka
-    // o sandboxie Tradiera, którego nie używamy — a realne ograniczenie jest inne:
-    // IV z tastytrade aktualizuje się raz dziennie, PO zamknięciu sesji (pole
-    // implied-volatility-updated-at). Intraday te liczby się nie zmieniają.
+    // Stopka MUSI mówić prawdę o źródłach danych. Ustalone empirycznie:
+    //  - IV, term structure, IV rank: tastytrade, AKTUALIZOWANE INTRADAY
+    //    (pole implied-volatility-updated-at pokazuje kilka minut wstecz w trakcie
+    //    sesji; przed otwarciem jest jeszcze z poprzedniego dnia — dlatego raport
+    //    wysyłamy PO otwarciu, żeby zawierał najświeższy odczyt).
+    //  - KURSY AKCJI: Finnhub.
+    //  - CENY OPCJI (bid/ask): niedostępne na używanym koncie — implied move jest
+    //    liczone modelem, a spreadu nie znamy. To jedyna realna luka.
     lines.push(
       '<hr style="border:none;border-top:1px solid #d0d7de;margin:16px 0">' +
         '<span style="color:#57606a;font-size:12px">' +
         'Narzędzie analityczne, nie rekomendacja inwestycyjna. ' +
-        'Zmienność implikowana pochodzi z dziennego odczytu po zamknięciu sesji — ' +
-        'przed wejściem zweryfikuj IV i spread u swojego brokera.' +
+        'Zmienność implikowana i term structure: tastytrade (odczyt intraday). ' +
+        'Kursy: Finnhub. Ceny opcji (bid/ask) nie są dostępne w tym źródle — ' +
+        'implied move jest szacowany modelowo, więc przed wejściem zweryfikuj ' +
+        'spread i realną cenę struktury u swojego brokera.' +
         '</span>',
     );
     // Jasny motyw: ciemne tło bywa obcinane przez klientów pocztowych i źle
