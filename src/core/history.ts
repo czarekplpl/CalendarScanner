@@ -18,6 +18,20 @@ const IV_KEY_PREFIX = 'ivhist:';
 const ALERTS_KEY = 'alerts:sent';
 const MAX_OBSERVATIONS = 260;
 const MAX_ALERT_RECORDS = 500;
+
+/**
+ * Licznik alertów wysłanych danego dnia.
+ *
+ * PO CO: limit „na przebieg" nie wystarcza. Gdy cron chodzi, a Ty uruchomisz
+ * dodatkowo ręczny skan z alertami, limit na przebieg przepuściłby kolejną
+ * porcję — i dostałbyś 8, 12 czy 16 wiadomości dziennie zamiast 4.
+ * Licznik dzienny pilnuje budżetu NIEZALEŻNIE od liczby uruchomień.
+ *
+ * Klucz zawiera datę, więc resetuje się sam o północy (UTC) — nie trzeba
+ * żadnego zadania czyszczącego. TTL to zapas na wypadek, gdyby data w kluczu
+ * się nie zmieniła (np. brak przebiegów).
+ */
+const DAILY_COUNT_PREFIX = 'alerts:daily:';
 const IV_TTL_SECONDS = 400 * 24 * 3600; // ~13 miesięcy
 
 export interface IvObservation {
@@ -224,6 +238,32 @@ export async function markAlertedBatch(
   if (records.length === 0) return;
   for (const record of records) markAlerted(registry, record);
   await saveAlertRegistry(env, registry);
+}
+
+/** Ile alertów wysłano już danego dnia (data w formacie YYYY-MM-DD). */
+export async function loadDailyAlertCount(env: Env, asOf: string): Promise<number> {
+  if (!env.STATE) return 0;
+  try {
+    const raw = await env.STATE.get(`${DAILY_COUNT_PREFIX}${asOf}`, 'text');
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Zapisuje nowy stan licznika dziennego. Best-effort — brak KV nie blokuje alertów. */
+export async function saveDailyAlertCount(env: Env, asOf: string, count: number): Promise<void> {
+  if (!env.STATE) return;
+  try {
+    await env.STATE.put(`${DAILY_COUNT_PREFIX}${asOf}`, String(count), {
+      // 3 dni: klucz zawiera datę, więc stary wpis i tak jest ignorowany —
+      // TTL to tylko sprzątanie po sobie.
+      expirationTtl: 3 * 24 * 3600,
+    });
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** Porządkuje rejestr: usuwa wpisy dla cykli wyników starszych niż `days`. */

@@ -100,7 +100,11 @@ function candidate(overrides: Partial<CalendarCandidate> = {}): CalendarCandidat
   };
 }
 
-function scanWith(candidates: CalendarCandidate[]): ScanResult {
+/**
+ * Buduje wynik skanu do testów. `overrides` pozwala zmienić datę sesyjną —
+ * potrzebne do testowania dziennego budżetu alertów, bo licznik jest kluczowany datą.
+ */
+function scanWith(candidates: CalendarCandidate[], overrides: Partial<ScanResult> = {}): ScanResult {
   return {
     generatedAt: '2026-09-24T21:10:04.512Z',
     asOf: '2026-09-24',
@@ -110,6 +114,7 @@ function scanWith(candidates: CalendarCandidate[]): ScanResult {
     watchlistOnly: [],
     errors: [],
     durationMs: 1000,
+    ...overrides,
   };
 }
 
@@ -227,7 +232,9 @@ test('dispatchAlerts: wysyła na oba kanały i zapisuje rejestr JEDNYM zapisem K
   assert.equal(calls.length, 2, 'Telegram + e-mail');
   assert.match(calls[0]!.url, /api\.telegram\.org\/bot123:ABC\/sendMessage/);
   assert.match(calls[1]!.url, /api\.resend\.com\/emails/);
-  assert.equal(kv.puts, 1, 'rejestr alertów zapisany DOKŁADNIE raz, nie per alert');
+  // Dwa zapisy: rejestr deduplikacji (jeden na przebieg, nie per alert)
+  // + licznik dziennego budżetu. Wcześniej był tylko rejestr.
+  assert.equal(kv.puts, 2, 'rejestr raz + licznik dzienny raz — nie per alert');
 
   const registry = JSON.parse(kv.store.get('alerts:sent')!) as Record<string, { channels: string[] }>;
   const key = Object.keys(registry)[0]!;
@@ -404,6 +411,120 @@ test('dispatchAlerts: domyślny próg to 60, gdy zmienna nieustawiona', async ()
   );
   assert.equal(result.sent, 1, 'tylko kandydat z oceną 61 przechodzi');
   assert.equal(result.belowThreshold, 1);
+});
+
+test('dispatchAlerts: wysyła maksymalnie MAX_ALERTS_PER_DAY, wybierając NAJLEPSZE', async () => {
+  // Wymaganie: max 4 najlepsze firmy dziennie. Test sprawdza, że przy 7 kandydatach
+  // powyżej progu lecą dokładnie 4 — i to te z NAJWYŻSZĄ oceną.
+  const kv = makeKv();
+  const env = envWith({
+    STATE: kv,
+    ALERT_CHANNELS: 'telegram',
+    MIN_ALERT_SCORE: '60',
+    MAX_ALERTS_PER_RUN: '4',
+    MAX_ALERTS_PER_DAY: '4',
+  });
+
+  const kandydujacy = [
+    candidate({ symbol: 'AAA', score: 92, grade: 'A' }),
+    candidate({ symbol: 'BBB', score: 88, grade: 'A' }),
+    candidate({ symbol: 'CCC', score: 75, grade: 'B' }),
+    candidate({ symbol: 'DDD', score: 71, grade: 'B' }),
+    candidate({ symbol: 'EEE', score: 68, grade: 'B' }), // 5. w kolejności — NIE wysłany
+    candidate({ symbol: 'FFF', score: 65, grade: 'B' }), // 6. — NIE wysłany
+    candidate({ symbol: 'GGG', score: 40, grade: 'D' }), // poniżej progu
+  ];
+
+  const { result, calls } = await withFetch(() => dispatchAlerts(env, scanWith(kandydujacy)));
+
+  assert.equal(result.sent, 4, 'dokładnie 4 alerty');
+  assert.equal(calls.length, 4);
+  assert.equal(result.dailyLimitReached, 2, 'dwóch kandydatów powyżej progu nie zmieściło się w budżecie');
+  assert.equal(result.belowThreshold, 1, 'jeden poniżej progu oceny');
+
+  const wyslane = calls.map((c) => (c.body as { text: string }).text);
+  for (const sym of ['AAA', 'BBB', 'CCC', 'DDD']) {
+    assert.ok(wyslane.some((t) => t.includes(sym)), `${sym} (najlepszy) MUSI być wysłany`);
+  }
+  for (const sym of ['EEE', 'FFF', 'GGG']) {
+    assert.ok(!wyslane.some((t) => t.includes(sym)), `${sym} NIE może być wysłany`);
+  }
+});
+
+test('dispatchAlerts: dzienny budżet działa MIĘDZY przebiegami', async () => {
+  // Sedno dziennego limitu: cron wysyła 3, potem ręczne uruchomienie NIE może
+  // wysłać kolejnych 4 — zostało miejsce tylko na 1.
+  const kv = makeKv();
+  const env = envWith({
+    STATE: kv,
+    ALERT_CHANNELS: 'telegram',
+    MIN_ALERT_SCORE: '0',
+    MAX_ALERTS_PER_RUN: '4',
+    MAX_ALERTS_PER_DAY: '4',
+  });
+
+  const partia1 = ['A1', 'A2', 'A3'].map((sym) => candidate({ symbol: sym, score: 90, grade: 'A' }));
+  const pierwszy = await withFetch(() => dispatchAlerts(env, scanWith(partia1)));
+  assert.equal(pierwszy.result.sent, 3);
+  assert.equal(pierwszy.result.sentToday, 3);
+
+  // Drugi przebieg, inne spółki — budżet pozwala już tylko na 1
+  const partia2 = ['B1', 'B2', 'B3'].map((sym) => candidate({ symbol: sym, score: 85, grade: 'A' }));
+  const drugi = await withFetch(() => dispatchAlerts(env, scanWith(partia2)));
+  assert.equal(drugi.result.sent, 1, 'zostało miejsce tylko na jeden alert');
+  assert.equal(drugi.result.sentToday, 4, 'łącznie 4 dziś');
+  assert.equal(drugi.result.dailyLimitReached, 2, 'dwóch nie zmieściło się');
+
+  // Trzeci przebieg — budżet wyczerpany, ZERO wysyłek
+  const trzeci = await withFetch(() => dispatchAlerts(env, scanWith(partia2)));
+  assert.equal(trzeci.result.sent, 0, 'budżet wyczerpany — nic nie leci');
+  assert.equal(trzeci.calls.length, 0, 'żadnego ruchu sieciowego');
+});
+
+test('dispatchAlerts: licznik dzienny NIE blokuje alertów kolejnego dnia', async () => {
+  // Klucz licznika zawiera datę, więc nowy dzień = nowy budżet bez żadnego
+  // zadania czyszczącego.
+  //
+  // UWAGA: w teście trzeba użyć INNYCH spółek na drugi dzień. Ten sam cykl
+  // wyników tej samej spółki jest blokowany przez deduplikację (jeden alert na
+  // spółkę i cykl wyników), więc wysyłka nie poleci niezależnie od budżetu.
+  // To poprawne zachowanie — ten test sprawdza budżet, nie deduplikację.
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram', MIN_ALERT_SCORE: '0', MAX_ALERTS_PER_DAY: '4' });
+
+  const dzis = ['X1', 'X2', 'X3', 'X4', 'X5'].map((sym) =>
+    candidate({ symbol: sym, score: 90, grade: 'A', earnings: { symbol: sym, date: '2026-10-20', timing: 'amc', confirmed: true } }),
+  );
+  const pierwszy = await withFetch(() => dispatchAlerts(env, scanWith(dzis)));
+  assert.equal(pierwszy.result.sent, 4, 'dzienny budżet wykorzystany (4 z 5)');
+
+  // Ten sam dzień i te same spółki => blokada (budżet + deduplikacja)
+  const tenSamDzien = await withFetch(() => dispatchAlerts(env, scanWith(dzis)));
+  assert.equal(tenSamDzien.result.sent, 0);
+
+  // Nowy dzień, NOWE spółki => nowy budżet, alerty lecą
+  const jutro = ['Y1', 'Y2', 'Y3'].map((sym) =>
+    candidate({ symbol: sym, score: 88, grade: 'A', earnings: { symbol: sym, date: '2026-10-21', timing: 'amc', confirmed: true } }),
+  );
+  const drugi = await withFetch(() => dispatchAlerts(env, scanWith(jutro, { asOf: '2026-09-25' })));
+  assert.equal(drugi.result.sent, 3, 'nowy dzień to nowy budżet');
+  assert.equal(drugi.result.sentToday, 3, 'licznik zaczął od zera');
+});
+
+test('dispatchAlerts: ta sama spółka i cykl NIE lecą ponownie (deduplikacja ponad budżetem)', async () => {
+  // Kontrola, że dzienny budżet nie osłabił deduplikacji: spółka raz zaalertowana
+  // w danym cyklu wyników nie dostanie drugiego powiadomienia następnego dnia,
+  // dopóki nie wejdzie w kolejny próg (T30 -> T14 -> SCORE80).
+  const kv = makeKv();
+  const env = envWith({ STATE: kv, ALERT_CHANNELS: 'telegram', MIN_ALERT_SCORE: '0', MAX_ALERTS_PER_DAY: '4' });
+
+  const spolka = candidate({ symbol: 'AAA', score: 75, grade: 'B' });
+  const d1 = await withFetch(() => dispatchAlerts(env, scanWith([spolka], { asOf: '2026-09-24' })));
+  assert.equal(d1.result.sent, 1);
+
+  const d2 = await withFetch(() => dispatchAlerts(env, scanWith([spolka], { asOf: '2026-09-25' })));
+  assert.equal(d2.result.sent, 0, 'ta sama spółka i cykl — bez powtórki');
+  assert.equal(d2.result.skipped, 1, 'policzone jako pominięte przez deduplikację');
 });
 
 test('dispatchAlerts: brak skonfigurowanych kanałów nic nie robi', async () => {

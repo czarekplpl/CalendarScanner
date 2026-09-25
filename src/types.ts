@@ -194,4 +194,6 @@ export interface Env {
   REQUIRE_API_KEY?: string;
   CACHE_TTL_SECONDS?: string;
   MAX_ALERTS_PER_RUN?: string;
+  /** Twardy dzienny budżet alertów, niezależny od liczby uruchomień skanu. */
+  MAX_ALERTS_PER_DAY?: string;
 }

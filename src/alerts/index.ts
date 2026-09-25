@@ -16,7 +16,9 @@ import {
   alertTier,
   alreadyAlerted,
   loadAlertRegistry,
+  loadDailyAlertCount,
   markAlertedBatch,
+  saveDailyAlertCount,
 } from '../core/history.ts';
 import type { AlertRecord, CalendarCandidate, Env, ScanResult } from '../types.ts';
 
@@ -31,6 +33,10 @@ export interface AlertDispatchResult {
   skipped: number;
   /** Pominięte z powodu oceny poniżej MIN_ALERT_SCORE (są w dashboardzie i bazie) */
   belowThreshold: number;
+  /** Pominięte, bo dzienny budżet alertów został już wykorzystany */
+  dailyLimitReached: number;
+  /** Ile alertów wysłano dziś łącznie (wliczając wcześniejsze przebiegi) */
+  sentToday: number;
   channels: string[];
   errors: string[];
 }
@@ -282,7 +288,15 @@ async function sendEmail(env: Env, subject: string, html: string): Promise<void>
  * Wywoływane tylko z crona (i z /scan, gdy body zawiera ?alerts=1).
  */
 export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertDispatchResult> {
-  const out: AlertDispatchResult = { sent: 0, skipped: 0, belowThreshold: 0, channels: [], errors: [] };
+  const out: AlertDispatchResult = {
+    sent: 0,
+    skipped: 0,
+    belowThreshold: 0,
+    dailyLimitReached: 0,
+    sentToday: 0,
+    channels: [],
+    errors: [],
+  };
 
   const channels = (env.ALERT_CHANNELS ?? 'dashboard')
     .split(',')
@@ -294,10 +308,25 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
   const wantsEmail = channels.includes('email');
   if (!wantsTelegram && !wantsEmail) return out;
 
-  const maxAlerts = num(env, 'MAX_ALERTS_PER_RUN', 25);
+  const maxAlerts = num(env, 'MAX_ALERTS_PER_RUN', 4);
   // Próg oceny: poniżej niego NIE wysyłamy alertu, ale kandydat zostaje w danych.
   // Domyślnie 60 — patrz uzasadnienie w wrangler.toml. Wartość 0 wyłącza próg.
   const minScore = num(env, 'MIN_ALERT_SCORE', 60);
+
+  // ── DZIENNY BUDŻET ─────────────────────────────────────────────────────────
+  // Limit na przebieg nie wystarcza: cron + ręczne uruchomienie dałyby 2x więcej
+  // wiadomości. Licznik dzienny trzyma twardy budżet niezależnie od liczby skanów.
+  const dailyLimit = num(env, 'MAX_ALERTS_PER_DAY', 4);
+  const alreadySentToday = await loadDailyAlertCount(env, scan.asOf);
+  const remainingToday = Math.max(0, dailyLimit - alreadySentToday);
+  const budget = Math.min(maxAlerts, remainingToday);
+
+  // Kandydaci są posortowani malejąco po ocenie (core/scan.ts), więc pierwsze
+  // pozycje to NAJLEPSZE firmy. Bierzemy dokładnie tyle, ile wynosi budżet.
+  // Gdy budżet wyczerpany, reszta liczy się jako dailyLimitReached — są widoczne
+  // w dashboardzie i zapisane w bazie, tylko nie lecą powiadomieniem.
+  const doWyslania = scan.candidates.filter((c) => c.score >= minScore).slice(0, budget);
+  const ponadBudzet = scan.candidates.filter((c) => c.score >= minScore).length - doWyslania.length;
   const registry = await loadAlertRegistry(env);
   const sentAt = new Date().toISOString();
   // Rekordy zbieramy w pamięci i zapisujemy do KV JEDEN raz na końcu.
@@ -306,18 +335,11 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
   const pending: AlertRecord[] = [];
   let count = 0;
 
-  for (const candidate of scan.candidates) {
-    if (count >= maxAlerts) break;
+  // Liczymy kandydatów poniżej progu (dla raportu) — wysyłamy tylko `doWyslania`.
+  out.belowThreshold = scan.candidates.filter((c) => c.score < minScore).length;
+  out.dailyLimitReached = ponadBudzet;
 
-    // Filtr oceny. Kandydaci poniżej progu są świadomie pomijani — inaczej Telegram
-    // dostawał ~21 wiadomości dziennie, w większości o ocenie 40 (ściętej za problem
-    // krytyczny). Nie oznaczamy ich jako wysłanych, więc jeśli ocena wzrośnie przy
-    // kolejnym skanie, alert poleci wtedy.
-    if (candidate.score < minScore) {
-      out.belowThreshold++;
-      continue;
-    }
-
+  for (const candidate of doWyslania) {
     const tier = alertTier(candidate.daysToEarnings, candidate.score);
     const key = alertKey(candidate.symbol, candidate.earnings.date, tier);
 
@@ -378,6 +400,12 @@ export async function dispatchAlerts(env: Env, scan: ScanResult): Promise<AlertD
   }
 
   await markAlertedBatch(env, registry, pending);
+
+  // Aktualizacja licznika dziennego — jeden zapis KV na przebieg.
+  out.sentToday = alreadySentToday + out.sent;
+  if (out.sent > 0) {
+    await saveDailyAlertCount(env, scan.asOf, out.sentToday);
+  }
 
   scan.counts.alertsSent = out.sent;
   return out;
