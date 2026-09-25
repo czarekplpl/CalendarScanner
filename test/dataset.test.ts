@@ -582,6 +582,56 @@ test('kontrakt: kolejność kolumn w kodzie odpowiada kolejności wartości', as
   assert.equal(ins.params.length, CANDIDATE_COLUMNS.length);
 });
 
+test('KV: zapis historii IV tylko gdy wartość się zmieniła (oszczędność limitów)', async () => {
+  // Darmowy plan Cloudflare KV ma limit 1000 zapisów na dobę. Zapisywaliśmy
+  // obserwację IV dla KAŻDEJ analizowanej spółki przy KAŻDYM przebiegu — 21 zapisów
+  // na skan, nawet gdy wartość była identyczna. Przy skanie raz dziennie i tej samej
+  // sesji dawało to dziesiątki zbędnych zapisów i realnie zbliżało konto do limitu.
+  //
+  // Ten test pilnuje, że zapis następuje tylko przy realnej zmianie wartości.
+  const { recordIvObservation } = await import('../src/core/history.ts');
+
+  const store = new Map<string, string>();
+  let puts = 0;
+  const kv = {
+    async get(key: string, type?: string) {
+      const raw = store.get(key);
+      if (raw === undefined) return null;
+      return type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(key: string, value: string) {
+      puts++;
+      store.set(key, value);
+    },
+  } as unknown as Env['STATE'];
+
+  const env = { STATE: kv } as Env;
+
+  // 1. Pierwszy zapis danego dnia — musi się odbyć (nie ma jeszcze wpisu)
+  await recordIvObservation(env, 'AAA', '2026-09-24', 0.35);
+  assert.equal(puts, 1, 'pierwsza obserwacja dnia musi zostać zapisana');
+
+  // 2. Ta sama wartość, ten sam dzień — zapis ZBĘDNY, nie może się odbyć
+  await recordIvObservation(env, 'AAA', '2026-09-24', 0.35);
+  assert.equal(puts, 1, 'identyczna wartość nie może generować zapisu');
+
+  // 3. Wartość różni się minimalnie (w granicach tolerancji) — nadal bez zapisu
+  await recordIvObservation(env, 'AAA', '2026-09-24', 0.35 + 1e-9);
+  assert.equal(puts, 1, 'różnica poniżej tolerancji to ta sama wartość');
+
+  // 4. Realna zmiana IV — zapis MUSI nastąpić, inaczej tracimy historię
+  await recordIvObservation(env, 'AAA', '2026-09-24', 0.41);
+  assert.equal(puts, 2, 'realna zmiana IV musi zostać zapisana');
+
+  // 5. Inny dzień — nowa obserwacja, zapis musi się odbyć
+  await recordIvObservation(env, 'AAA', '2026-09-25', 0.41);
+  assert.equal(puts, 3, 'kolejny dzień to nowa obserwacja');
+
+  // Historia musi zawierać oba dni
+  const hist = JSON.parse(store.get('ivhist:AAA')!) as { o: { day: number; iv: number }[] };
+  assert.equal(hist.o.length, 2, 'dwa dni w historii');
+});
+
 test('D1: brak bindingu nie wywala skanu, tylko raportuje pominięcie', async () => {
   const result = await writeScanToD1({} as Env, scanWith([candidate()]));
   assert.equal(result.attempted, false);

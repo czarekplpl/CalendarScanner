@@ -19,7 +19,13 @@
  */
 
 import { runScan, SCANNER_VERSION, readScanConfig } from './core/scan.ts';
-import { archiveDailyScan, archiveSpan, loadArchiveIndex, loadArchivedScans } from './core/archive.ts';
+import {
+  archiveDailyScan,
+  archiveSpan,
+  loadArchiveIndex,
+  loadArchivedScans,
+  loadLatestScan,
+} from './core/archive.ts';
 import { CANDIDATE_COLUMNS, rowsFromScans, toCsv } from './core/dataset.ts';
 import { checkD1Schema, writeScanToD1 } from './core/d1.ts';
 import { dispatchAlerts } from './alerts/index.ts';
@@ -28,10 +34,9 @@ import { UNIVERSE_SNAPSHOT } from './data/universe-snapshot.ts';
 import { timeInNewYork, todayInNewYork } from './core/market.ts';
 import type { Env, ScanResult } from './types.ts';
 
-const LAST_SCAN_KEY = 'scan:last';
-const LAST_SCAN_TTL = 14 * 24 * 3600;
-const LAST_ALERT_ERRORS_KEY = 'alerts:lastErrors';
-const LAST_ALERT_ERRORS_TTL = 7 * 24 * 3600;
+// UWAGA: nie ma już klucza `scan:last` — ostatni skan czytamy ze wskaźnika
+// `scan:latest` + migawki dnia w archiwum (patrz core/archive.ts). Trzymanie
+// pełnej kopii pod osobnym kluczem dublowało zapis do KV.
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -473,24 +478,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 async function loadScan(env: Env): Promise<ScanResult | undefined> {
-  if (!env.STATE) return undefined;
-  try {
-    const raw = await env.STATE.get(LAST_SCAN_KEY, 'json');
-    const scan = (raw as ScanResult | null) ?? undefined;
-    if (!scan) return undefined;
-
-    // Błędy wysyłki alertów trzymamy pod osobnym kluczem, bo powstają PO skanie.
-    // Bez tego błąd typu "Telegram odrzucił wiadomość" byłby widoczny wyłącznie
-    // w logach crona — a to najczęstsza cicha awaria w tym systemie.
-    const errRaw = await env.STATE.get(LAST_ALERT_ERRORS_KEY, 'json');
-    const alertErrors = (errRaw as { errors?: string[] } | null)?.errors;
-    if (alertErrors && alertErrors.length > 0) {
-      scan.errors = [...scan.errors, ...alertErrors.map((e) => `alert: ${e}`)];
-    }
-    return scan;
-  } catch {
-    return undefined;
-  }
+  return loadLatestScan(env);
 }
 
 /**
@@ -507,6 +495,14 @@ async function loadScan(env: Env): Promise<ScanResult | undefined> {
  * do backtestu — a to najgorszy rodzaj błędu, bo cichy i nieodwracalny.
  */
 async function persistScan(env: Env, scan: ScanResult, alertErrors: string[]): Promise<void> {
+  // Błędy wysyłki alertów dopisujemy DO SKANU przed archiwizacją, zamiast trzymać
+  // je w osobnym kluczu KV. Powód: osobny klucz to dodatkowy zapis na przebieg
+  // i dodatkowy odczyt na żądanie, a informacja i tak należy do tego skanu.
+  // Bez tego błąd typu „Telegram odrzucił wiadomość" byłby widoczny tylko w logach.
+  if (alertErrors.length > 0) {
+    scan.errors = [...scan.errors, ...alertErrors.map((e) => `alert: ${e}`)];
+  }
+
   await archiveDailyScan(env, scan);
 
   const d1 = await writeScanToD1(env, scan);
@@ -515,33 +511,5 @@ async function persistScan(env: Env, scan: ScanResult, alertErrors: string[]): P
   } else if (d1.attempted) {
     console.log(`[scanner] D1: kandydaci=${d1.candidatesWritten} watchlist=${d1.watchlistWritten}`);
   }
-
-  await storeScan(env, scan);
-  await storeAlertErrors(env, alertErrors);
 }
 
-async function storeScan(env: Env, scan: ScanResult): Promise<void> {
-  if (!env.STATE) return;
-  try {
-    await env.STATE.put(LAST_SCAN_KEY, JSON.stringify(scan), { expirationTtl: LAST_SCAN_TTL });
-  } catch (err) {
-    console.warn(`[scanner] nie udało się zapisać skanu: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-/**
- * Zapisuje błędy wysyłki alertów, żeby były widoczne w dashboardzie i /api/scan.
- * Powód: błąd dostarczenia powiadomienia jest CICHY — bez tego myślałbyś, że
- * alerty działają, podczas gdy Telegram odrzuca wiadomości (zły chat_id, bot
- * zablokowany przez użytkownika). Zapis pustej listy czyści poprzednie błędy.
- */
-async function storeAlertErrors(env: Env, errors: string[]): Promise<void> {
-  if (!env.STATE) return;
-  try {
-    await env.STATE.put(LAST_ALERT_ERRORS_KEY, JSON.stringify({ at: new Date().toISOString(), errors }), {
-      expirationTtl: LAST_ALERT_ERRORS_TTL,
-    });
-  } catch {
-    /* best-effort */
-  }
-}

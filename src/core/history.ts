@@ -70,6 +70,22 @@ export async function recordIvObservation(
 
   const today = epochDay(asOf);
   const existingIdx = history.o.findIndex((x) => x.day === today);
+  const poprzednia = existingIdx >= 0 ? history.o[existingIdx]!.iv : undefined;
+
+  // ── OSZCZĘDNOŚĆ ZAPISÓW KV ────────────────────────────────────────────────
+  // Darmowy plan Cloudflare KV ma limit 1000 zapisów na dobę. Zapisywaliśmy
+  // obserwację IV dla KAŻDEJ analizowanej spółki przy KAŻDYM przebiegu, czyli
+  // 21 zapisów na skan — nawet gdy wartość była identyczna jak poprzednio
+  // (a przy skanie raz dziennie i tej samej sesji często była).
+  //
+  // Teraz zapisujemy tylko wtedy, gdy wartość faktycznie się zmieniła. Przy
+  // pierwszym przebiegu danego dnia zapis następuje (bo nie ma jeszcze wpisu),
+  // a przy powtórnym — tylko gdy IV się różni. Typowo oszczędza to większość
+  // z tych 21 zapisów.
+  //
+  // Uwaga: tolerancja 1e-6, bo IV 0.3200001 i 0.32 to ta sama wartość w praktyce.
+  const bezZmian = poprzednia !== undefined && Math.abs(poprzednia - frontIv) < 1e-6;
+
   if (existingIdx >= 0) {
     history.o[existingIdx] = { day: today, iv: frontIv };
   } else {
@@ -81,7 +97,7 @@ export async function recordIvObservation(
   const cutoff = today - 400;
   history.o = history.o.filter((x) => x.day >= cutoff).slice(-MAX_OBSERVATIONS);
 
-  if (env.STATE) {
+  if (env.STATE && !bezZmian) {
     try {
       await env.STATE.put(`${IV_KEY_PREFIX}${symbol}`, JSON.stringify(history), {
         expirationTtl: IV_TTL_SECONDS,

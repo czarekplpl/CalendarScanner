@@ -259,7 +259,12 @@ test('end-to-end: cron wykrywa wyniki ~30 dni wcześniej i wysyła alert', async
   }
 
   // ── Zapisany skan (to, co trafia do KV i na dashboard) ────────────────────
-  const stored = state.store.get('scan:last');
+  // Skąd czytać skan: najpierw wskaźnik scan:latest, potem migawka dnia.
+  // Wcześniej istniał osobny klucz scan:last z pełną kopią — usunięty, bo
+  // dublował zapis do KV (dzienny limit 1000 zapisów na darmowym planie).
+  const latestDate = state.store.get('scan:latest');
+  assert.ok(latestDate, 'musi istnieć wskaźnik scan:latest');
+  const stored = state.store.get(`scan:day:${latestDate}`);
   assert.ok(stored, 'skan musi zostać zapisany do KV dla dashboardu');
   const scan = JSON.parse(stored) as import('../src/types.ts').ScanResult;
 

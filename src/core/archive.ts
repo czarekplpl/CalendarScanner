@@ -3,18 +3,22 @@
  * =========================================================
  *
  * PROBLEM, KTÓRY TO ROZWIĄZUJE:
- * Skaner trzyma w KV tylko OSTATNI wynik (`scan:last`) i kasuje go po 14 dniach.
- * Przy pracy crona 2x dziennie oznacza to, że po dwóch tygodniach nie ma czego
- * backtestować — każda migawka została nadpisana przez następną.
+ * Skaner trzymał w KV tylko OSTATNI wynik (jeden klucz, kasowany po 14 dniach).
+ * Przy pracy crona oznaczało to, że po dwóch tygodniach nie ma czego backtestować
+ * — każda migawka została nadpisana przez następną.
  *
  * Backtest wymaga zamrożonej migawki „co system wiedział danego dnia", a kluczowe
  * wartości (term structure, IV rank, implied move, spread, OI) są chwilowe —
  * darmowi dostawcy nie sprzedają ich historii. Dlatego archiwizujemy SUROWY wynik
  * skanu, zanim cokolwiek go nadpisze.
  *
- * Układ kluczy:
+ * Układ kluczy (3 zapisy na przebieg, wszystkie niezbędne):
  *   scan:day:YYYY-MM-DD  -> pełny ScanResult z tego dnia (nadpisywany tego samego dnia)
- *   scan:index           -> lista dni, które mają migawkę (żeby dało się eksportować)
+ *   scan:index           -> lista dni z migawką (do eksportu)
+ *   scan:latest          -> data najnowszej migawki (żeby dashboard wiedział, co czytać)
+ *
+ * Świadomie NIE ma osobnego klucza z kopią ostatniego skanu ani z błędami alertów —
+ * oba dublowały zapisy i zjadały dzienny limit KV (1000 zapisów na darmowym planie).
  *
  * Koszt: 2 zapisy KV na dzień, niezależnie od liczby spółek. Mieści się w darmowym
  * limicie (1000 zapisów/dzień) z ogromnym zapasem.
@@ -24,6 +28,15 @@ import type { Env, ScanResult } from '../types.ts';
 
 const DAY_PREFIX = 'scan:day:';
 const INDEX_KEY = 'scan:index';
+/**
+ * Wskaźnik na datę najnowszego skanu.
+ *
+ * PO CO OSOBNY KLUCZ: żeby odczytać ostatni skan, wystarczy jedno `get` na ten
+ * wskaźnik plus jedno na migawkę dnia. Wcześniej trzymaliśmy CAŁY skan dodatkowo
+ * pod `scan:last`, co dublowało zapis (ten sam JSON w dwóch kluczach) i zjadało
+ * dzienny limit zapisów KV. Wskaźnik to kilka bajtów, a migawka jest już zapisana.
+ */
+const LATEST_KEY = 'scan:latest';
 /** 400 dni ~ 13 miesięcy: wystarczy na porównanie rok do roku, wciąż tanie w KV. */
 const DAY_TTL_SECONDS = 400 * 24 * 3600;
 const INDEX_TTL_SECONDS = 420 * 24 * 3600;
@@ -58,6 +71,12 @@ export async function archiveDailyScan(env: Env, scan: ScanResult): Promise<void
     await env.STATE.put(`${DAY_PREFIX}${scan.asOf}`, JSON.stringify(scan), {
       expirationTtl: DAY_TTL_SECONDS,
     });
+    // Wskaźnik aktualizujemy TYLKO gdy data jest nowsza niż zapisana — dzięki temu
+    // powtórny przebieg tego samego dnia nadpisuje migawkę, ale nie cofa wskaźnika.
+    const current = await env.STATE.get(LATEST_KEY, 'text');
+    if (!current || current < scan.asOf) {
+      await env.STATE.put(LATEST_KEY, scan.asOf, { expirationTtl: DAY_TTL_SECONDS });
+    }
   } catch (err) {
     console.warn(
       `[scanner] nie udało się zapisać migawki dnia ${scan.asOf}: ${err instanceof Error ? err.message : String(err)}`,
@@ -132,6 +151,23 @@ export async function loadArchivedScans(
     }
   }
   return { scans, missing, truncated };
+}
+
+/**
+ * Wczytuje najnowszą migawkę skanu (to, co pokazuje dashboard i /api/scan).
+ * Dwa odczyty: wskaźnik + migawka dnia. Wcześniej był osobny klucz `scan:last`
+ * z pełną kopią, co dublowało zapis.
+ */
+export async function loadLatestScan(env: Env): Promise<ScanResult | undefined> {
+  if (!env.STATE) return undefined;
+  try {
+    const latest = await env.STATE.get(LATEST_KEY, 'text');
+    if (!latest) return undefined;
+    const raw = await env.STATE.get(`${DAY_PREFIX}${latest}`, 'json');
+    return (raw as ScanResult | null) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Data najstarszej i najnowszej migawki — do raportowania w /api/health. */
